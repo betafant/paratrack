@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -12,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import httpx
+import pytest
 
 from prack.ogn.fake_server import FakeOgnServer
 from prack.ogn.simulator import PilotSpec, Simulator
@@ -112,3 +115,67 @@ def test_run_ingests_a_feed_and_serves_it(tmp_path):
         (aircraft,) = client.get("/api/live").json()["aircraft"]
         assert aircraft["id"] == "FLRD00001"
     assert (tmp_path / "data" / "prack.db").exists()
+
+
+# ------------------------------------------------------- how a service manager (systemd, Docker, kill) stops it
+
+
+def _feed_lines() -> list[str]:
+    start = datetime.now(UTC) - timedelta(minutes=14)
+    pilots = [PilotSpec("D00001", ("flarm",), launch=(46.6453, 7.6511), flight_s=600, drop_m=300.0, stand_s=60)]
+    sim = Simulator(start, pilots, seed=5)
+    return [line for k in range(400) for line in sim.lines(sim.at(k))]
+
+
+def _stopped_by_sigterm(tmp_path, *args: str) -> tuple[int, str]:
+    """Run ``prack ARGS`` against a fake OGN server, send SIGTERM once it is connected, return (exit code, output)."""
+    lines = _feed_lines()
+    with FakeOgnServer(lines, per_tick=100, interval=0.01) as server:
+        environment = {
+            **{k: v for k, v in os.environ.items() if not k.startswith("PRACK_")},
+            "PRACK_DATA_DIR": str(tmp_path / "data"),
+            "PRACK_OGN_HOST": "127.0.0.1",
+            "PRACK_OGN_PORT": str(server.port),
+            "PRACK_TERRAIN_ENABLED": "false",
+            "PRACK_DDB_ENABLED": "false",
+            "PYTHONUNBUFFERED": "1",
+            "PYTHONUTF8": "1",
+        }
+        process = subprocess.Popen(
+            [sys.executable, "-m", "prack", *args],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=environment, text=True,
+        )  # fmt: skip
+        try:
+            wait_for(lambda: server.connections > 0 and server.logins, timeout=30)
+            time.sleep(3)  # let some lines arrive
+            process.send_signal(signal.SIGTERM)
+            output, _ = process.communicate(timeout=30)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
+    return process.returncode, output
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM is how POSIX service managers stop programs")
+def test_sigterm_stops_track_like_ctrl_c_and_exits_normally(tmp_path):
+    code, output = _stopped_by_sigterm(tmp_path, "track")
+    assert code == 0 and "Stopping ..." in output, output
+    with sqlite3.connect(tmp_path / "data" / "prack.db") as db:
+        assert db.execute("select count(*) from fixes").fetchone()[0] > 0  # what had arrived was written
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM is how POSIX service managers stop programs")
+def test_sigterm_makes_diagnose_report_what_it_heard(tmp_path):
+    code, output = _stopped_by_sigterm(tmp_path, "diagnose", "120")
+    assert code == 0 and "Interrupted, reporting what was received so far." in output, output
+    assert "Sources x aircraft types" in output
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM is how POSIX service managers stop programs")
+def test_sigterm_shuts_prack_run_down_cleanly(tmp_path):
+    code, output = _stopped_by_sigterm(tmp_path, "run", "--port", str(free_port()))
+    assert "Application shutdown complete" in output and "Traceback" not in output, output
+    assert code in (0, -signal.SIGTERM, 130), code
+    with sqlite3.connect(tmp_path / "data" / "prack.db") as db:
+        assert db.execute("select count(*) from fixes").fetchone()[0] > 0

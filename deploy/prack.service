@@ -1,11 +1,13 @@
 # systemd unit for prack on a Linux server (Oracle Always Free, a Raspberry Pi, ...).
 #
-#   sudo useradd --system --home-dir /var/lib/prack --create-home --shell /usr/sbin/nologin prack
+#   sudo useradd --system --no-create-home --home-dir /var/lib/prack --shell /usr/sbin/nologin prack
 #   sudo python3 -m venv /opt/prack/venv && sudo /opt/prack/venv/bin/pip install /path/to/prack
 #   sudo install -d -m 750 -o root -g prack /etc/prack
-#   sudo cp .env.example /etc/prack/prack.env     (edit it: PRACK_AUTH_*, PRACK_HOST, ...)
+#   sudo install -m 600 .env.example /etc/prack/prack.env     (then edit it: PRACK_AUTH_*, PRACK_HOST, ...)
 #   sudo cp deploy/prack.service /etc/systemd/system/ && sudo systemctl daemon-reload
 #   sudo systemctl enable --now prack && journalctl -u prack -f
+#
+# systemd creates /var/lib/prack (StateDirectory) and gives it to the prack user.
 
 [Unit]
 Description=prack: paraglider tracker (OGN to SQL)
@@ -17,6 +19,8 @@ Wants=network-online.target
 Type=simple
 User=prack
 Group=prack
+StateDirectory=prack
+StateDirectoryMode=0750
 WorkingDirectory=/var/lib/prack
 Environment=PRACK_DATA_DIR=/var/lib/prack
 EnvironmentFile=-/etc/prack/prack.env

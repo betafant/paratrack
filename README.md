@@ -26,7 +26,24 @@ Open <http://127.0.0.1:8000>. `prack track` records without the web server (data
 A real run needs internet for the OGN feed, the terrain tiles and the swisstopo base maps; `prack demo` only needs
 the last two, and falls back to a plain background and invented altitudes without them.
 
-Linux and macOS: `python3 -m venv .venv && . .venv/bin/activate && pip install .`
+## Quick start (Linux)
+
+Needs Python 3.11 or newer (`python3 --version`; [older systems](#1-requirements) are covered in the manual below).
+
+```sh
+sudo apt install python3 python3-venv git      # Debian, Ubuntu. Fedora: sudo dnf install python3 git
+git clone https://github.com/betafant/paratrack.git ~/prack
+cd ~/prack
+python3 -m venv .venv && . .venv/bin/activate
+pip install .
+prack demo                        # simulated pilots, works offline: http://127.0.0.1:8000
+prack run                         # the real thing: record flights from OGN and serve them (Ctrl+C stops)
+```
+
+Open <http://127.0.0.1:8000> (`xdg-open http://127.0.0.1:8000`). The database and caches go to `data/` in the
+directory you start prack from. To keep it running in the background and start it at boot, see
+[Run it as a service](#3-run-it-as-a-service); for a server on the internet, [HTTPS and the
+internet](#4-https-and-the-internet). macOS should work the same way (`brew install python@3.12`); it has not been tested.
 
 ## Commands
 
@@ -240,38 +257,187 @@ flights = pd.read_sql("SELECT * FROM flights_v WHERE airborne", con)
 print(flights.groupby("local_date").distance_km.describe())
 ```
 
-## Deployment
+## Linux manual
 
-**Docker** (any Linux server, including Oracle Always Free ARM machines; the image is about 220 MB, runs as an
-unprivileged user and keeps its data in the volume `prack-data`):
+Tested on Ubuntu 24.04 (x86-64) with Python 3.11, 3.12 and 3.13 (the whole test suite, browser tests included, passes
+on all three), with the service set up as described below and run as an unprivileged user, and with the Docker image. ARM servers (Oracle Always Free Ampere, Raspberry Pi 64-bit) are expected to work: every dependency
+publishes `aarch64` wheels, so nothing is compiled; that has not been run on ARM hardware here.
+
+### 1. Requirements
+
+Python **3.11 or newer** with `venv`, and `git` (or unpack a source archive). Check with `python3 --version`.
+`pip install` refuses older Pythons with *"requires a different Python"*, and `python -m prack` says so too.
+
+| System | Python | What to do |
+|---|---|---|
+| Ubuntu 24.04, Debian 12 and 13, Fedora 39+, Arch | 3.11 to 3.13 | `sudo apt install python3 python3-venv git` (Debian, Ubuntu), `sudo dnf install python3 git` (Fedora), `sudo pacman -S python git` (Arch) |
+| Ubuntu 22.04 | 3.10: too old | `sudo add-apt-repository ppa:deadsnakes/ppa && sudo apt update && sudo apt install python3.12 python3.12-venv git`, then use `python3.12` instead of `python3` below |
+| RHEL, Oracle Linux, Rocky, AlmaLinux 8 and 9 | 3.6 or 3.9 by default: too old | `sudo dnf install python3.12 git` (or `python3.11`), then use `python3.12` instead of `python3` below |
+| Anything else, or you would rather not touch the system Python | any | Use the [Docker image](#docker) |
+
+The last three rows are the usual routes, not something this project has run. Debian and Ubuntu need the
+`python3-venv` package, otherwise `python3 -m venv` fails with *"ensurepip is not available"*.
+
+### 2. Install and run as yourself
 
 ```sh
+git clone https://github.com/betafant/paratrack.git ~/prack
+cd ~/prack
+python3 -m venv .venv
+. .venv/bin/activate              # in every new shell; or call ~/prack/.venv/bin/prack directly
+pip install .
+prack config                      # what will run: regions, the APRS-IS filter, where the data goes
+prack demo                        # simulated pilots: http://127.0.0.1:8000 (Ctrl+C stops)
+cp .env.example .env              # settings, all optional (see Configuration); prack reads .env from the directory it starts in
+prack diagnose 60                 # 60 seconds of the real feed, and why every dropped line was dropped
+prack run                         # record and serve
+```
+
+* **Where things are.** `data/prack.db` (SQLite) and `data/dem/` (terrain cache) in the current directory, or wherever
+  `PRACK_DATA_DIR` points. Start prack from the same directory each time, or set `PRACK_DATA_DIR=$HOME/.local/share/prack`.
+* **Who can connect.** Only this machine (`127.0.0.1`). From your laptop, tunnel instead of opening a port:
+  `ssh -L 8000:127.0.0.1:8000 you@server`, then browse to <http://127.0.0.1:8000>. To listen on the network set
+  `PRACK_HOST=0.0.0.0` **and** `PRACK_AUTH_USER` / `PRACK_AUTH_PASSWORD`; without a password prack logs a warning.
+* **The server's time zone does not matter**: days are counted in the region's time zone. Its **clock** does: keep NTP
+  running (`timedatectl`), see [Troubleshooting](#troubleshooting).
+* **For a quick test in the background** use `tmux`, or `nohup .venv/bin/prack run > prack.log 2>&1 &`. For anything
+  longer, use a service.
+
+### 3. Run it as a service
+
+systemd stops programs with SIGTERM; prack then writes what it has and exits normally (flights still open are closed as
+gaps at the next start and resume if the pilot is still flying), and it is restarted if it crashes.
+
+**For one user** (a PC or home server, no root): [`deploy/prack-user.service`](deploy/prack-user.service). It expects
+the clone in `~/prack` and the virtual environment in `~/prack/.venv`, as above.
+
+```sh
+mkdir -p ~/.config/systemd/user
+cp ~/prack/deploy/prack-user.service ~/.config/systemd/user/prack.service
+systemctl --user daemon-reload
+systemctl --user enable --now prack
+systemctl --user status prack
+journalctl --user -u prack -f     # the log
+loginctl enable-linger "$USER"    # keep it running when you are logged out, and start it at boot
+```
+
+Settings live in `~/prack/.env`; after changing them, `systemctl --user restart prack`.
+
+**For a server**, system-wide: [`deploy/prack.service`](deploy/prack.service) runs prack as its own unprivileged user
+`prack`, with a strict sandbox (read-only system, private `/tmp`, no capabilities, only the network and its own data
+directory). The program lives in `/opt/prack/venv`, the settings in `/etc/prack/prack.env`, the data in `/var/lib/prack`
+(systemd creates it).
+
+```sh
+sudo useradd --system --no-create-home --home-dir /var/lib/prack --shell /usr/sbin/nologin prack
+sudo python3 -m venv /opt/prack/venv
+sudo /opt/prack/venv/bin/pip install ~/prack          # leaves build/ and *.egg-info owned by root in ~/prack: harmless
+sudo install -d -m 750 -o root -g prack /etc/prack
+sudo install -m 600 ~/prack/.env.example /etc/prack/prack.env
+sudo nano /etc/prack/prack.env                        # at least PRACK_AUTH_USER and PRACK_AUTH_PASSWORD
+sudo cp ~/prack/deploy/prack.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now prack
+systemctl status prack
+journalctl -u prack -f
+```
+
+Change settings with `sudo nano /etc/prack/prack.env && sudo systemctl restart prack`. The service listens on
+`127.0.0.1:8000`; the next section puts HTTPS in front of it.
+
+### 4. HTTPS and the internet
+
+1. Set `PRACK_AUTH_USER` and `PRACK_AUTH_PASSWORD` (basic auth sends the password in clear text, so HTTPS is a must).
+2. Keep prack on `127.0.0.1` and let a reverse proxy take ports 80 and 443. **Caddy** gets and renews the certificate by
+   itself; point a DNS name at the machine first:
+
+   ```sh
+   sudo apt install caddy             # Debian 12+, Ubuntu 24.04; other systems: https://caddyserver.com/docs/install
+   sudo tee /etc/caddy/Caddyfile <<'EOF'
+   tracker.example.org {
+   	reverse_proxy 127.0.0.1:8000 {
+   		flush_interval -1
+   	}
+   }
+   EOF
+   sudo systemctl reload caddy
+   ```
+
+   `flush_interval -1` matters: the live view is a server-sent event stream and must not be buffered. With **nginx**
+   (certificate from `certbot --nginx`) use, inside `server { ... }`:
+
+   ```nginx
+   location / {
+       proxy_pass http://127.0.0.1:8000;
+       proxy_http_version 1.1;
+       proxy_buffering off;          # the live stream
+       proxy_read_timeout 1h;
+   }
+   ```
+3. Open the ports. `sudo ufw allow 80,443/tcp` (Ubuntu), or `sudo firewall-cmd --permanent --add-service={http,https} &&
+   sudo firewall-cmd --reload` (Fedora, RHEL family). **Oracle Cloud** needs two things: ingress rules for TCP 80 and 443 in
+   the subnet's security list (or network security group), and the instance's own firewall (Oracle's Ubuntu images ship
+   iptables rules that reject new connections: look at `sudo iptables -L INPUT -n --line-numbers` and allow 80 and 443
+   above the `REJECT` rule, then `sudo netfilter-persistent save`). Do not open port 8000.
+
+### 5. Update, back up, uninstall
+
+```sh
+# update (user install)
+cd ~/prack && git pull && .venv/bin/pip install . && systemctl --user restart prack
+# update (system install)
+cd ~/prack && git pull && sudo /opt/prack/venv/bin/pip install . && sudo systemctl restart prack
+```
+
+**Backup** of the SQLite database while prack runs (the database is in WAL mode; the standard library's online backup
+copies a consistent state, no extra packages needed). Do it as the service user, so that no file in the data directory
+ends up owned by root:
+
+```sh
+sudo -u prack python3 - <<'EOF'
+import sqlite3
+src = sqlite3.connect("/var/lib/prack/prack.db")     # user install: ~/prack/data/prack.db, without sudo -u prack
+dst = sqlite3.connect("/var/lib/prack/backup.db")
+src.backup(dst)
+EOF
+sudo install -m 600 -o "$USER" /var/lib/prack/backup.db ~/prack-backup.db && sudo rm /var/lib/prack/backup.db
+```
+
+(`sqlite3 prack.db ".backup backup.db"` does the same if you have the `sqlite3` tool; PostgreSQL: `pg_dump`.) Restore by
+stopping prack and putting the file back as `prack.db`, owned by `prack`. The terrain cache in `dem/` can be thrown away.
+Run other maintenance the same way, as the service user, for example
+`sudo -u prack env PRACK_DATA_DIR=/var/lib/prack /opt/prack/venv/bin/prack repair` (add `PRACK_DATABASE_URL` for PostgreSQL).
+
+**Uninstall** (system install): `sudo systemctl disable --now prack && sudo rm /etc/systemd/system/prack.service &&
+sudo systemctl daemon-reload && sudo userdel prack && sudo rm -rf /opt/prack /etc/prack /var/lib/prack` (the last one
+deletes the data). User install: `systemctl --user disable --now prack`, remove `~/.config/systemd/user/prack.service`
+and `~/prack`.
+
+## Docker
+
+Any Linux server, including ARM; the image is about 220 MB, runs as an unprivileged user (uid 10001), has a health check
+and keeps its data in the volume `prack-data`. It also sidesteps the Python version of the host.
+
+```sh
+git clone https://github.com/betafant/paratrack.git ~/prack && cd ~/prack
 cp .env.example .env              # set PRACK_AUTH_USER and PRACK_AUTH_PASSWORD before anyone else can reach it
 docker compose up -d --build      # http://127.0.0.1:8000, reachable from this machine only
 docker compose logs -f prack
 ```
 
-`docker-compose.yml` publishes the port on `127.0.0.1` only (`PRACK_PUBLISH_PORT` in `.env` changes the number). To serve it on the internet with a certificate, point a
-DNS name at the machine, put `PRACK_DOMAIN=tracker.example.org` and the password in `.env` and run
-`docker compose --profile https up -d`: Caddy (see [`deploy/Caddyfile`](deploy/Caddyfile)) takes ports 80 and 443,
-gets a Let's Encrypt certificate and forwards to prack. Without a password do not do this.
+`docker-compose.yml` publishes the port on `127.0.0.1` only (`PRACK_PUBLISH_PORT` in `.env` changes the number). To serve
+it on the internet with a certificate, point a DNS name at the machine, put `PRACK_DOMAIN=tracker.example.org` and the
+password in `.env` and run `docker compose --profile https up -d`: Caddy (see [`deploy/Caddyfile`](deploy/Caddyfile)) takes
+ports 80 and 443, gets a Let's Encrypt certificate and forwards to prack. Without a password do not do this.
 To upgrade, update the source and run `docker compose up -d --build` again; the data stays in the volume. The
 container's health check calls `/api/health`. `docker stop` (SIGTERM) makes the app write everything it has; flights
 still open are closed as gaps at the next start and resume if the pilot is still flying.
 
-**systemd** (no Docker): [`deploy/prack.service`](deploy/prack.service) runs `prack run` as the user `prack` with
-its data in `/var/lib/prack`, settings from `/etc/prack/prack.env` (a copy of `.env.example`), restart on failure and
-a strict sandbox. The commands to set it up are at the top of the file.
-
-**Behind another reverse proxy:** forward everything to port 8000 and turn buffering off for `/api/live/stream`
-(nginx: `proxy_buffering off;`, Caddy: `flush_interval -1`), otherwise the live view arrives in bursts.
+## Resources and PostgreSQL
 
 **Resources.** Measured with the simulator and 300 paragliders in the air at once: about 100 MB of RAM (55 MB when
 idle) and a few percent of one core. The database grows by roughly 60 bytes per fix, so 100 one-hour flights are about
 20 MB. Nothing is deleted automatically: remove old flights with SQL, or start a new database.
-
-**Backups.** SQLite: `sqlite3 data/prack.db ".backup backup.db"` works while prack runs (the database is in WAL
-mode). PostgreSQL: `pg_dump`. The terrain cache in `data/dem` can be thrown away.
 
 **PostgreSQL** instead of SQLite: `pip install ".[postgres]"` (already in the Docker image) and
 `PRACK_DATABASE_URL=postgresql+psycopg://user:password@host/prack`. Tables and views are created at the first start.
@@ -280,12 +446,20 @@ mode). PostgreSQL: `pg_dump`. The terrain cache in `data/dem` can be thrown away
 
 | Symptom | Look at |
 |---|---|
+| `requires a different Python: 3.10.x not in '>=3.11'`, or *"prack needs Python 3.11 or newer"* | Your `python3` is too old: see [Requirements](#1-requirements). |
+| `ensurepip is not available` (Debian, Ubuntu) | `sudo apt install python3-venv` (or `python3.12-venv`). |
 | `Activate.ps1 cannot be loaded` (PowerShell) | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, or use `cmd` and `.venv\Scripts\activate.bat`. |
 | The map is empty | `prack diagnose 60` and compare with <https://live.glidernet.org>; every dropped line has a reason. The dot in the top bar shows whether the OGN feed is up. |
+| The feed is up but nothing is recorded; `drops` in `/api/status` (or the report of `prack diagnose`) show `future` or `stale` | The machine's clock is wrong: positions more than 2 minutes ahead of it, or more than 30 minutes behind it, are rejected. Fix the time: `timedatectl set-ntp true` (systemd), or install `chrony`. |
 | Grey background, no base map | The swisstopo tiles are blocked or offline; the region file's `tiles` can point to another server. |
 | **3D** is greyed out | The terrain tiles are switched off (`PRACK_TERRAIN_ENABLED=false`). |
 | Aircraft without heights above ground | No terrain tiles reached the server (check `data/dem`); flights recorded meanwhile have no `ground` values. |
-| `Address already in use` | Another program uses port 8000: `prack run --port 8001`. |
+| `Address already in use` | Another program uses port 8000 (`ss -ltnp \| grep :8000` shows which): `prack run --port 8001`. |
+| `Permission denied: 'data'` | The directory you started in is not writable: start from your home directory, or set `PRACK_DATA_DIR`. |
+| Works on the server, not from your laptop | By design it listens on `127.0.0.1` only: use an SSH tunnel or [HTTPS](#4-https-and-the-internet). |
+| `systemctl --user` says *Failed to connect to bus* over SSH | `export XDG_RUNTIME_DIR=/run/user/$(id -u)`, and make sure `loginctl enable-linger "$USER"` was run. |
+| The service fails with `status=203/EXEC` and `journalctl` shows `avc: denied` (SELinux: RHEL, Oracle Linux, Fedora) | Run `sudo restorecon -Rv /opt/prack`. If it persists, label the program as executable: `sudo semanage fcontext -a -t bin_t '/opt/prack/venv/bin(/.*)?' && sudo restorecon -Rv /opt/prack`. (The usual remedy for programs under `/opt`; not tried here.) |
+| The live view arrives in bursts behind a reverse proxy | Turn proxy buffering off, see [HTTPS and the internet](#4-https-and-the-internet). |
 
 ## Development
 
@@ -327,5 +501,5 @@ prack/
              builder.py fake_server.py simulator.py
   tracking/  tracker.py rules.py finalizer.py flightstats.py maintenance.py
 tests/        pytest files; js/ (node --test), test_ui*.py with uirig.py (Playwright), test_deploy.py
-Dockerfile  docker-compose.yml  .dockerignore  deploy/ (prack.service, Caddyfile)
+Dockerfile  docker-compose.yml  .dockerignore  deploy/ (prack.service, prack-user.service, Caddyfile)
 ```

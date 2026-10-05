@@ -1,0 +1,27 @@
+# systemd user unit: prack for one person on a Linux PC or home server, no root needed.
+# Assumes the source in ~/prack and a virtual environment in ~/prack/.venv (see "Quick start (Linux)" in the README).
+#
+#   mkdir -p ~/.config/systemd/user && cp deploy/prack-user.service ~/.config/systemd/user/prack.service
+#   systemctl --user daemon-reload && systemctl --user enable --now prack
+#   journalctl --user -u prack -f
+#   loginctl enable-linger "$USER"        # keep it running when you are logged out, and start it at boot
+#
+# Settings: a file named .env in ~/prack (see .env.example). The data (data/prack.db) is written there too.
+
+[Unit]
+Description=prack: paraglider tracker (OGN to SQL)
+Documentation=https://github.com/betafant/paratrack
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/prack
+ExecStart=%h/prack/.venv/bin/prack run
+Restart=on-failure
+RestartSec=5
+# SIGTERM makes prack finish what it is writing; give it time.
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

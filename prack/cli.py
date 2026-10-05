@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
+import signal
 import sys
 import time
 from datetime import UTC, date, datetime, timedelta
@@ -283,6 +285,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _stop_on_sigterm() -> object:
+    """A service manager (systemd, Docker, ``kill``) stops a program with SIGTERM. Treat it like Ctrl+C, so that
+    ``track`` and ``diagnose`` write what they have and report before they exit, instead of being cut off.
+    Returns the handler that was there before."""
+
+    def handler(signum: int, frame: object) -> None:
+        raise KeyboardInterrupt
+
+    with contextlib.suppress(ValueError, OSError):  # not in the main thread, or a platform without SIGTERM
+        return signal.signal(signal.SIGTERM, handler)
+    return None
+
+
 def main(argv: list[str] | None = None) -> None:
     for stream in (sys.stdout, sys.stderr):  # a legacy Windows console must not crash on odd characters
         if hasattr(stream, "reconfigure"):
@@ -292,6 +307,7 @@ def main(argv: list[str] | None = None) -> None:
     if not getattr(args, "func", None):
         parser.print_help()
         raise SystemExit(0)
+    previous = _stop_on_sigterm()
     try:
         settings = Settings.from_env()
         logging.basicConfig(
@@ -305,6 +321,10 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(2) from None
     except KeyboardInterrupt:
         raise SystemExit(130) from None
+    finally:
+        if previous is not None:
+            with contextlib.suppress(ValueError, OSError):
+                signal.signal(signal.SIGTERM, previous)
 
 
 if __name__ == "__main__":

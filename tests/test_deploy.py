@@ -71,6 +71,7 @@ def test_the_systemd_unit_runs_prack_as_its_own_user_with_a_restart_and_a_harden
     assert service["User"] == "prack" and service["Restart"] == "on-failure"
     assert service["EnvironmentFile"] == "-/etc/prack/prack.env"  # optional: the dash
     assert service["Environment"] == "PRACK_DATA_DIR=/var/lib/prack" and service["WorkingDirectory"] == "/var/lib/prack"
+    assert service["StateDirectory"] == "prack"  # systemd creates /var/lib/prack and gives it to the service user
     assert service["ReadWritePaths"] == "/var/lib/prack" and service["ProtectSystem"] == "strict"
     for key in ("NoNewPrivileges", "PrivateTmp", "ProtectHome", "ProtectKernelTunables", "LockPersonality"):
         assert service[key] == "true", key
@@ -88,5 +89,30 @@ def test_systemd_analyze_finds_nothing_to_complain_about(tmp_path):
     text = text.replace("/var/lib/prack", str(tmp_path))
     copy = tmp_path / "prack.service"
     copy.write_text(text, encoding="utf-8")
+    result = subprocess.run(["systemd-analyze", "verify", str(copy)], capture_output=True, text=True, timeout=60)
+    assert (result.stdout + result.stderr).strip() == "", result.stdout + result.stderr
+
+
+USER_UNIT = ROOT / "deploy" / "prack-user.service"
+
+
+def test_the_user_unit_runs_from_the_home_directory_without_root():
+    parser = configparser.ConfigParser(strict=False, interpolation=None)
+    parser.optionxform = str
+    parser.read(USER_UNIT, encoding="utf-8")
+    service = parser["Service"]
+    assert service["ExecStart"] == "%h/prack/.venv/bin/prack run" and service["WorkingDirectory"] == "%h/prack"
+    assert service["Restart"] == "on-failure" and "User" not in service  # a user unit runs as the user
+    assert parser["Install"]["WantedBy"] == "default.target"  # the target of user services (not multi-user.target)
+
+
+@pytest.mark.skipif(shutil.which("systemd-analyze") is None, reason="systemd-analyze is not installed")
+def test_systemd_analyze_accepts_the_user_unit(tmp_path):
+    text = USER_UNIT.read_text(encoding="utf-8")
+    text = re.sub(r"^ExecStart=.*$", "ExecStart=/bin/true", text, flags=re.M)
+    text = text.replace("%h/prack", str(tmp_path))
+    copy = tmp_path / "prack.service"
+    copy.write_text(text, encoding="utf-8")
+    # checked like a system unit (a user manager is not available everywhere); the only user-specific part, %h, is gone
     result = subprocess.run(["systemd-analyze", "verify", str(copy)], capture_output=True, text=True, timeout=60)
     assert (result.stdout + result.stderr).strip() == "", result.stdout + result.stderr
