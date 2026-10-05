@@ -5,73 +5,21 @@ from __future__ import annotations
 import pytest
 
 from .uirig import (
-    Console,
-    browser,
     count_pixels,
-    live_app,
+    day_label,
+    jump,
+    label_texts,
+    local_day,
     new_context,
     screen_position,
     shot,
+    shown,
     wait_for_aircraft,
 )
 
 pytestmark = pytest.mark.ui
 
 MIA = "D00002"  # a FLARM + FANET pilot called Mia
-
-
-@pytest.fixture(scope="module")
-def chromium():
-    with browser() as b:
-        yield b
-
-
-@pytest.fixture(scope="module")
-def app(tmp_path_factory):
-    with live_app(tmp_path_factory.mktemp("ui")) as url:
-        yield url
-
-
-@pytest.fixture
-def make_page(chromium, app):
-    contexts, consoles = [], []
-
-    def make(url_path: str = "/", **options):
-        context = new_context(chromium, app, **options)
-        contexts.append(context)
-        console = Console(app)
-        consoles.append(console)
-        page = context.new_page()
-        console.attach(page)
-        page.goto(app + url_path)
-        return page
-
-    yield make
-    for context in contexts:
-        context.close()
-    problems = [p for c in consoles for p in c.problems]
-    assert not problems, "the page reported problems:\n" + "\n".join(problems)
-
-
-def jump(page, address: str, zoom: float) -> None:
-    page.evaluate(
-        "([a, z]) => { const p = window.prack; const e = p.store.find(a);"
-        " p.view.map.jumpTo({center: [e.lon, e.lat], zoom: z}); }",
-        [address, zoom],
-    )
-    page.wait_for_function("window.prack.layer('markers') !== null")
-    page.wait_for_timeout(600)
-
-
-def label_texts(page) -> list[str]:
-    return page.evaluate(
-        "(() => { const l = window.prack.layer('labels');"
-        " return l ? l.props.data.map((d) => l.props.getText(d)) : []; })()"
-    )
-
-
-def shown(page, layer: str) -> int:
-    return page.evaluate("(id) => { const l = window.prack.layer(id); return l ? l.props.data.length : 0; }", layer)
 
 
 # ---------------------------------------------------------------- the page and the markers
@@ -331,7 +279,7 @@ def test_the_controls_can_be_reached_with_the_keyboard(make_page):
     page = make_page()
     wait_for_aircraft(page, 5)
     focused = []
-    for _ in range(2):
+    for _ in range(4):
         page.keyboard.press("Tab")
         focused.append(
             page.evaluate(
@@ -339,7 +287,10 @@ def test_the_controls_can_be_reached_with_the_keyboard(make_page):
                 " return [e.textContent.trim(), getComputedStyle(e).outlineStyle]; })()"
             )
         )
-    assert focused == [["2D", "solid"], ["Ground1", "solid"]]  # the bar comes first, with a visible focus ring
+    names = [name for name, _ in focused]
+    assert names[0] == "Live" and names[2:] == ["2D", "Ground1"]  # the bar comes first
+    assert names[1] == day_label(local_day(0))  # then the date button
+    assert all(outline == "solid" for _, outline in focused)  # with a visible focus ring everywhere
     page.keyboard.press("Space")  # the Ground chip, pressed from the keyboard
     assert page.get_by_role("button", name="Ground").get_attribute("aria-pressed") == "true"
     page.keyboard.press("Shift+Tab")

@@ -14,6 +14,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 from PIL import Image, ImageDraw
@@ -30,6 +31,8 @@ SHOTS = Path(__file__).parent / "shots"
 LAUNCH_ARGS = ["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"]
 ACCENT = (139, 124, 255)  # the marker colour in the dark theme
 LONG = {"flight_s": 1500, "stand_s": 300}
+SHORT = {"flight_s": 120, "drop_m": 300.0, "stand_s": 300}
+PAST_DAYS = {1: ["D00201", "D00202"], 2: ["D00101", "D00102", "D00103"]}  # days back -> pilots who flew then
 
 
 def base_tile() -> bytes:
@@ -130,7 +133,8 @@ def new_context(chromium, base_url: str, *, theme: str = "dark", size=(1280, 800
 
 @contextmanager
 def live_app(tmp_path: Path, *, terrain: bool = True, grounded: bool = True, link: str = "connected") -> Iterator[str]:
-    """The app with four paragliders in the air (and one on the ground), as the live feed would have left it."""
+    """The app with four paragliders in the air (and one on the ground), as the live feed would have left it, and
+    closed flights on the two days before: two yesterday, three the day before."""
     transport = None
     if terrain:
         import httpx
@@ -138,6 +142,16 @@ def live_app(tmp_path: Path, *, terrain: bool = True, grounded: bool = True, lin
         png = terrarium_png(hills)
         transport = httpx.MockTransport(lambda request: httpx.Response(200, content=png))
     runtime = make_runtime(tmp_path, terrain_transport=transport, ddb=False)
+    for back, addresses in PAST_DAYS.items():  # earlier days: closed flights with their previews
+        day = datetime.now(UTC).replace(hour=8, minute=0, second=0, microsecond=0) - timedelta(days=back)
+        pilots = [
+            PilotSpec(a, ("flarm",), launch=(46.60 + 0.05 * i, 7.60 + 0.1 * i), delay_s=90 * i, **SHORT)
+            for i, a in enumerate(addresses)
+        ]
+        fly_day(runtime, day, pilots)
+        runtime.tracker.close_all()
+        runtime.finalizer.drain()
+    runtime.tracker.sweep(datetime.now(UTC))  # those pilots went home: nothing of them stays on the live map
     start = datetime.now(UTC) - timedelta(minutes=14)
     launch = (46.6453, 7.6511)
     fly_day(
@@ -153,6 +167,7 @@ def live_app(tmp_path: Path, *, terrain: bool = True, grounded: bool = True, lin
     if grounded:
         when = start + timedelta(seconds=600)
         runtime.tracker.process_beacon(beacon(int(when.timestamp()), 46.62, 7.70, 800.0, 0.0, address="D00099"), when)
+    runtime.tracker.flush(force=True)  # the flights table knows about the flights in the air (no writer thread here)
     runtime.link = LinkStatus(state=link, server="test")
     app = create_app(runtime, stream_interval=0.4, full_every=4.0)
     with serve(app) as (url, _):
@@ -189,3 +204,62 @@ def count_pixels(png: bytes, around: tuple[float, float], colour=ACCENT, radius:
             if abs(r - colour[0]) < tolerance and abs(g - colour[1]) < tolerance and abs(b - colour[2]) < tolerance:
                 n += 1
     return n
+
+
+def count_saturated(png: bytes, around: tuple[float, float], radius: int = 14, chroma: int = 70) -> int:
+    """Pixels near a point that are clearly coloured (the map itself is grey): the altitude colours of a path."""
+    image = Image.open(io.BytesIO(png)).convert("RGB")
+    cx, cy = int(around[0]), int(around[1])
+    n = 0
+    for y in range(max(0, cy - radius), min(image.height, cy + radius)):
+        for x in range(max(0, cx - radius), min(image.width, cx + radius)):
+            r, g, b = image.getpixel((x, y))
+            if max(r, g, b) - min(r, g, b) > chroma:
+                n += 1
+    return n
+
+
+def camera_still(page, quiet: float = 0.6) -> None:
+    """Wait until the camera has stopped (an animation to fit the day may start a moment after the day has loaded)."""
+    page.wait_for_function(
+        f"""(() => {{
+          const m = window.prack.view.map; const c = m.getCenter();
+          const key = [c.lng, c.lat, m.getZoom(), m.getPitch()].join();
+          const now = performance.now();
+          if (window.__still?.key !== key || m.isMoving()) window.__still = {{ key, since: now }};
+          return now - window.__still.since > {quiet * 1000};
+        }})()""",
+        timeout=30_000,
+        polling=100,
+    )
+
+
+def local_day(back: int):
+    """The calendar day ``back`` days ago in Switzerland, which is where the app's days are counted."""
+    return datetime.now(ZoneInfo("Europe/Zurich")).date() - timedelta(days=back)
+
+
+def day_label(day) -> str:
+    """How the date button writes a day: "Mon 5 Oct" (no strftime flag that Windows does not know)."""
+    return f"{day:%a} {day.day} {day:%b}"
+
+
+def jump(page, address: str, zoom: float) -> None:
+    page.evaluate(
+        "([a, z]) => { const p = window.prack; const e = p.store.find(a);"
+        " p.view.map.jumpTo({center: [e.lon, e.lat], zoom: z}); }",
+        [address, zoom],
+    )
+    page.wait_for_function("window.prack.layer('markers') !== null")
+    page.wait_for_timeout(600)
+
+
+def label_texts(page) -> list[str]:
+    return page.evaluate(
+        "(() => { const l = window.prack.layer('labels');"
+        " return l ? l.props.data.map((d) => l.props.getText(d)) : []; })()"
+    )
+
+
+def shown(page, layer: str) -> int:
+    return page.evaluate("(id) => { const l = window.prack.layer(id); return l ? l.props.data.length : 0; }", layer)

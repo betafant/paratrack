@@ -42,6 +42,12 @@ export function makeIconAtlas() {
   };
 }
 
+const NO_PATHS = {
+  length: 0,
+  startIndices: [],
+  attributes: { getPath: { value: new Float64Array(0), size: 3 }, getColor: { value: new Uint8Array(0), size: 4, normalized: true } },
+};
+
 const position = (mode3d) => (mode3d ? (d) => [d.lon, d.lat, d.alt] : (d) => [d.lon, d.lat, 0]);
 
 /**
@@ -220,6 +226,67 @@ export function buildLayers(ctx) {
       ...flat,
     }),
   );
+  return layers;
+}
+
+/**
+ * The day view. ctx: { palette, mode3d, previews ({data} of buildPreviews) | null, highlight (binary data) | null,
+ * track ({path, curtain}) | null, ends ([{ pos, color }]) | null }. The previews are pickable: deck.gl reports the
+ * number of the path under the pointer, which `owners` of buildPreviews maps back to a flight.
+ */
+export function buildDayLayers(ctx) {
+  const { PathLayer, LineLayer, ScatterplotLayer } = globalThis.deck;
+  const { palette, mode3d } = ctx;
+  const flat = mode3d ? {} : { parameters: { depthCompare: 'always' } };
+  const path = (id, data, width, extra = {}) =>
+    new PathLayer({
+      id,
+      data,
+      _pathType: 'open',
+      widthUnits: 'pixels',
+      getWidth: width,
+      capRounded: true,
+      jointRounded: true,
+      pickable: false,
+      ...flat,
+      ...extra,
+    });
+  const layers = [];
+  if (ctx.previews?.data.length) layers.push(path('previews', ctx.previews.data, 2, { pickable: true, widthMinPixels: 1.5 }));
+  // always in the stack, so the layers do not change when the pointer moves over a path: a click right after a hover
+  // would otherwise be picked against layers deck.gl has not drawn yet
+  layers.push(path('preview-hover', ctx.highlight ?? NO_PATHS, 4.5));
+  if (mode3d && ctx.track?.curtain?.length) {
+    layers.push(
+      new LineLayer({
+        id: 'track-curtain',
+        data: ctx.track.curtain,
+        getColor: palette.curtain,
+        widthUnits: 'pixels',
+        getWidth: 1,
+        pickable: false,
+      }),
+    );
+  }
+  if (ctx.track?.path?.length) layers.push(path('track', ctx.track.path, 4));
+  if (ctx.ends?.length) {
+    layers.push(
+      new ScatterplotLayer({
+        id: 'track-ends',
+        data: ctx.ends,
+        getPosition: (d) => d.pos,
+        getFillColor: (d) => d.color,
+        getLineColor: [...palette.halo, 240],
+        stroked: true,
+        radiusUnits: 'pixels',
+        getRadius: 6,
+        lineWidthUnits: 'pixels',
+        getLineWidth: 2,
+        pickable: false,
+        ...flat,
+      }),
+    );
+  }
   return layers;
 }
 

@@ -6,6 +6,7 @@ import { absoluteUrl } from './api.js';
 const PHOTO = /aerial|satellite|imagery|ortho|photo|image/i;
 const MAX_3D_ZOOM = 12; // a track fitted in 3D must not end with the camera inside a mountain (zoom, see fitBounds)
 const PITCH_3D = 60;
+const PICK_RADIUS = 8; // thin lines and small markers are easier to hit
 
 const skyFor = (theme) =>
   theme === 'light'
@@ -89,13 +90,25 @@ export class MapView {
     this.overlay = new deck.MapboxOverlay({
       interleaved: true,
       layers: [],
-      onClick: (info) => onClick?.(info),
+      pickingRadius: PICK_RADIUS,
       onHover: (info) => {
-        this.map.getCanvas().style.cursor = info?.object ? 'pointer' : '';
+        this.map.getCanvas().style.cursor = info?.picked ? 'pointer' : '';
         onHover?.(info);
       },
     });
     this.map.addControl(this.overlay);
+
+    // Clicks are picked here, at the click, not by deck.gl's own handler: that one picks on the mouse button going
+    // down, asynchronously, and drops the click when it comes straight after the pointer arrived.
+    this.map.on('click', (event) => {
+      let info = null;
+      try {
+        info = this.overlay.pickObject({ x: event.point.x, y: event.point.y, radius: PICK_RADIUS });
+      } catch {
+        /* nothing drawn yet */
+      }
+      onClick?.(info ?? { picked: false });
+    });
 
     // A message from the stream must not move the map while a finger or the mouse is on it.
     this.interacting = false;

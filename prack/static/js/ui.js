@@ -1,104 +1,75 @@
-// The small floating controls: top bar, the card of the selected paraglider, a toast. Built here (not in the HTML)
-// so every string comes from strings.js.
+// The small floating controls: top bar, the card of the selected paraglider or flight, the strip of a day's flights,
+// a hint and a toast. Built here (not in the HTML) so every string comes from strings.js.
 
+import { h, icon } from './dom.js';
 import { S } from './strings.js';
 
-const SVG = 'http://www.w3.org/2000/svg';
-
-const ICONS = {
-  layers: 'M12 3 3 8l9 5 9-5-9-5Zm-7.6 9.2L3 13l9 5 9-5-1.4-.8L12 16 4.4 12.2Zm0 4L3 17l9 5 9-5-1.4-.8L12 20l-7.6-3.8Z',
-  sun: 'M12 7a5 5 0 1 0 0 10 5 5 0 0 0 0-10Zm0-5h0v3m0 14v3M4.2 4.2l2.1 2.1m11.4 11.4 2.1 2.1M2 12h3m14 0h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1',
-  moon: 'M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11Z',
-  close: 'M6 6l12 12M18 6 6 18',
-  fit: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5',
-};
-
-function icon(name, { stroke = true } = {}) {
-  const svg = document.createElementNS(SVG, 'svg');
-  svg.setAttribute('viewBox', '0 0 24 24');
-  svg.setAttribute('width', '20');
-  svg.setAttribute('height', '20');
-  svg.setAttribute('aria-hidden', 'true');
-  svg.setAttribute('focusable', 'false');
-  const path = document.createElementNS(SVG, 'path');
-  path.setAttribute('d', ICONS[name]);
-  if (stroke && name !== 'layers' && name !== 'moon') {
-    path.setAttribute('fill', 'none');
-    path.setAttribute('stroke', 'currentColor');
-    path.setAttribute('stroke-width', '1.8');
-    path.setAttribute('stroke-linecap', 'round');
-    path.setAttribute('stroke-linejoin', 'round');
-  } else {
-    path.setAttribute('fill', 'currentColor');
-  }
-  svg.append(path);
-  return svg;
-}
-
-function h(tag, attrs = {}, ...children) {
-  const el = document.createElement(tag);
-  for (const [key, value] of Object.entries(attrs)) {
-    if (value === undefined || value === null || value === false) continue;
-    if (key === 'class') el.className = value;
-    else if (key === 'text') el.textContent = value;
-    else el.setAttribute(key, value === true ? '' : value);
-  }
-  for (const child of children) if (child) el.append(child);
-  return el;
-}
-
-const STATS = [
-  ['alt', 'altitude'],
-  ['agl', 'agl'],
-  ['spd', 'speed'],
-  ['vs', 'vario'],
-  ['hdg', 'heading'],
-];
-const FLIGHT_STATS = [
-  ['takeoff', 'takeoff'],
-  ['duration', 'duration'],
-  ['distance', 'distance'],
-];
-
 export function createUi(host, handlers) {
+  // ---- top bar
   const dot = h('span', { class: 'dot', role: 'img', 'data-level': 'warn' });
-  const count = h('span', { class: 'count', id: 'air-count' });
 
-  const viewButtons = ['2d', '3d'].map((view) =>
-    h('button', { type: 'button', role: 'radio', 'aria-checked': 'false', 'data-view': view, text: view === '2d' ? S.view.flat : S.view.terrain }),
-  );
-  const segView = h('div', { class: 'seg', role: 'radiogroup', 'aria-label': S.view.label }, ...viewButtons);
+  const radio = (value, text) => h('button', { type: 'button', role: 'radio', 'aria-checked': 'false', 'data-value': value, text });
+  const segGroup = (label, buttons, onChoose) => {
+    const el = h('div', { class: 'seg', role: 'radiogroup', 'aria-label': label }, ...buttons);
+    buttons.forEach((button) => {
+      button.addEventListener('click', () => onChoose(button.dataset.value));
+      button.addEventListener('keydown', (event) => {
+        if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+        event.preventDefault();
+        const other = buttons.find((b) => b !== button);
+        if (!other.disabled) {
+          onChoose(other.dataset.value);
+          other.focus();
+        }
+      });
+    });
+    return el;
+  };
+
+  const modeButtons = [radio('live', S.mode.live), radio('history', S.mode.history)];
+  const segMode = segGroup(S.mode.label, modeButtons, (value) => handlers.onMode?.(value));
+
+  const dateText = h('span', { class: 'label date' });
+  const calendarButton = h('button', { type: 'button', class: 'btn date-btn' }, icon('calendar'), dateText);
+  const prevDay = h('button', { type: 'button', class: 'btn icon-only', 'aria-label': S.day.prev }, icon('left'));
+  const nextDay = h('button', { type: 'button', class: 'btn icon-only', 'aria-label': S.day.next }, icon('right'));
+  const todayButton = h('button', { type: 'button', class: 'btn today-btn', text: S.day.today });
+  const dayNav = h('div', { class: 'daynav' }, prevDay, nextDay, todayButton);
+
+  const viewButtons = [radio('2d', S.view.flat), radio('3d', S.view.terrain)];
+  const segView = segGroup(S.view.label, viewButtons, (value) => handlers.onView?.(value));
 
   const groundCount = h('span', { class: 'count' });
   const groundChip = h('button', { type: 'button', class: 'chip', 'aria-pressed': 'false', title: S.ground.title }, h('span', { text: S.ground.label }), groundCount);
 
   const baseName = h('span', { class: 'label' });
   const baseButton = h('button', { type: 'button', class: 'btn', 'aria-label': S.base.label }, icon('layers'), baseName);
-
   const themeButton = h('button', { type: 'button', class: 'btn icon-only' });
 
   const bar = h(
     'header',
     { class: 'bar glass' },
     h('div', { class: 'brand' }, dot, h('span', { class: 'word', text: S.app })),
+    segMode,
+    calendarButton,
+    dayNav,
     segView,
-    groundChip,
-    baseButton,
-    themeButton,
+    h('div', { class: 'group tools' }, groundChip, baseButton, themeButton),
   );
-  const status = h('div', { class: 'status glass', role: 'status' }, count);
 
-  // ---- the card of the selected paraglider
-  const values = {};
-  const cell = (key, label) => {
-    const dd = h('dd', { 'data-k': key });
-    values[key] = dd;
-    return h('div', { class: 'cell', 'data-cell': key }, h('dt', { text: label }), dd);
-  };
+  // ---- bottom: the count, and in History the strip of the day's flights
+  const count = h('span', { class: 'count', id: 'air-count' });
+  const status = h('div', { class: 'status glass', role: 'status' }, count);
+  const strip = h('div', { class: 'flights glass', role: 'group', 'aria-label': S.flights.list, hidden: true });
+  const dock = h('div', { class: 'dock' }, status, strip);
+
+  // ---- the card of the selected paraglider or flight
   const name = h('h2', { class: 'name' });
   const source = h('span', { class: 'tag' });
   const who = h('span', { class: 'who' });
   const closeButton = h('button', { type: 'button', class: 'btn icon-only close', 'aria-label': S.card.close }, icon('close'));
+  const primary = h('dl', { class: 'grid' });
+  const secondary = h('dl', { class: 'grid second' });
   const follow = h('button', { type: 'button', class: 'toggle', 'aria-pressed': 'false', title: S.card.followHint }, h('span', { class: 'knob' }), h('span', { text: S.card.follow }));
   const fit = h('button', { type: 'button', class: 'btn icon-only', 'aria-label': S.card.fitTrack }, icon('fit'));
   const note = h('p', { class: 'note' });
@@ -106,37 +77,66 @@ export function createUi(host, handlers) {
     'aside',
     { class: 'card glass', hidden: true, 'aria-label': S.card.title },
     h('div', { class: 'head' }, h('div', { class: 'titles' }, name, h('p', { class: 'sub' }, source, who)), closeButton),
-    h('dl', { class: 'grid' }, ...STATS.map(([k, label]) => cell(k, S.card[label]))),
-    h('dl', { class: 'grid flight' }, ...FLIGHT_STATS.map(([k, label]) => cell(k, S.card[label]))),
+    primary,
+    secondary,
     note,
     h('div', { class: 'foot' }, follow, fit),
   );
+  const hint = h('div', { class: 'hint glass', hidden: true });
   const toastBox = h('div', { class: 'toast glass', role: 'status', hidden: true });
 
-  host.append(bar, status, card, toastBox);
+  host.append(bar, dock, card, hint, toastBox);
+  // The card sits under the bar, which wraps onto a second row on narrow screens.
+  const fitBar = () => document.documentElement.style.setProperty('--bar-h', `${bar.offsetHeight}px`);
+  if (typeof ResizeObserver !== 'undefined') new ResizeObserver(fitBar).observe(bar);
+  fitBar();
 
   // ---- behaviour
-  viewButtons.forEach((button) => {
-    button.addEventListener('click', () => handlers.onView?.(button.dataset.view));
-    button.addEventListener('keydown', (event) => {
-      if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
-      event.preventDefault();
-      const other = viewButtons.find((b) => b !== button);
-      if (!other.disabled) {
-        handlers.onView?.(other.dataset.view);
-        other.focus();
-      }
-    });
-  });
   groundChip.addEventListener('click', () => handlers.onGround?.(groundChip.getAttribute('aria-pressed') !== 'true'));
   baseButton.addEventListener('click', () => handlers.onBase?.());
   themeButton.addEventListener('click', () => handlers.onTheme?.());
   closeButton.addEventListener('click', () => handlers.onClose?.());
   follow.addEventListener('click', () => handlers.onFollow?.(follow.getAttribute('aria-pressed') !== 'true'));
   fit.addEventListener('click', () => handlers.onFit?.());
+  prevDay.addEventListener('click', () => handlers.onDay?.('prev'));
+  nextDay.addEventListener('click', () => handlers.onDay?.('next'));
+  todayButton.addEventListener('click', () => handlers.onDay?.('today'));
+  strip.addEventListener('click', (event) => {
+    const chip = event.target.closest('button[data-id]');
+    if (chip) handlers.onPickFlight?.(chip.dataset.id);
+  });
+
+  /** A grid of label/value cells. The cells are rebuilt only when the set of cells changes, otherwise updated in place. */
+  function renderGrid(dl, cells) {
+    dl.hidden = cells.length === 0;
+    const signature = cells.map((c) => c.key).join('|');
+    if (dl.dataset.signature !== signature) {
+      dl.dataset.signature = signature;
+      dl.replaceChildren(
+        ...cells.map((c) => h('div', { class: 'cell', 'data-cell': c.key }, h('dt', { text: c.label }), h('dd', { 'data-k': c.key }))),
+      );
+    }
+    for (const c of cells) {
+      const dd = dl.querySelector(`[data-k="${c.key}"]`);
+      if (dd.textContent !== c.value) dd.textContent = c.value;
+      dd.dataset.sign = c.sign ?? '';
+    }
+  }
+
+  const setChecked = (buttons, value) => {
+    for (const b of buttons) {
+      const on = b.dataset.value === value;
+      b.setAttribute('aria-checked', String(on));
+      b.tabIndex = on ? 0 : -1;
+    }
+  };
 
   let toastTimer = null;
-  const api = {
+  let stripSignature = '';
+  return {
+    root: host,
+    calendarButton,
+
     setTheme(theme) {
       const next = theme === 'dark' ? 'toLight' : 'toDark';
       themeButton.replaceChildren(icon(theme === 'dark' ? 'sun' : 'moon'));
@@ -144,14 +144,23 @@ export function createUi(host, handlers) {
       themeButton.title = S.theme[next];
     },
     setView(view, { terrain }) {
-      for (const b of viewButtons) {
-        const on = b.dataset.view === view;
-        b.setAttribute('aria-checked', String(on));
-        b.tabIndex = on ? 0 : -1;
-      }
-      const b3 = viewButtons[1];
-      b3.disabled = !terrain;
-      b3.title = terrain ? '' : S.view.noTerrain;
+      setChecked(viewButtons, view);
+      viewButtons[1].disabled = !terrain;
+      viewButtons[1].title = terrain ? '' : S.view.noTerrain;
+    },
+    /** 'live' or 'history': what the date controls and the Ground chip show. */
+    setMode(mode) {
+      setChecked(modeButtons, mode);
+      dayNav.hidden = mode !== 'history';
+      groundChip.hidden = mode !== 'live';
+      document.body.dataset.mode = mode;
+    },
+    /** The day shown on the calendar button; `canNext`: there is a later day to go to. */
+    setDay({ text, isToday, canNext }) {
+      dateText.textContent = text;
+      calendarButton.setAttribute('aria-label', S.day.open(text));
+      nextDay.disabled = !canNext;
+      todayButton.disabled = isToday;
     },
     setGround(on, n) {
       groundChip.setAttribute('aria-pressed', String(on));
@@ -168,10 +177,28 @@ export function createUi(host, handlers) {
       dot.setAttribute('aria-label', text);
       dot.title = text;
     },
-    setCount(n) {
-      const text = n === 0 ? S.empty : S.count(n);
+    setCount(text) {
       if (count.textContent !== text) count.textContent = text; // a status region: only announce real changes
     },
+    /** The strip of a day's flights: [{ id, name, time }]; null hides it (Live). */
+    setFlights(items, selectedId = null) {
+      strip.hidden = items === null;
+      if (items === null) return;
+      const signature = items.map((i) => `${i.id}:${i.name}:${i.time}`).join('|');
+      if (signature !== stripSignature) {
+        stripSignature = signature;
+        strip.replaceChildren(
+          ...items.map((i) =>
+            h('button', { type: 'button', class: 'flight', 'data-id': String(i.id), 'aria-pressed': 'false' }, h('span', { class: 'who', text: i.name }), h('span', { class: 'when', text: i.time })),
+          ),
+        );
+      }
+      for (const chip of strip.children) chip.setAttribute('aria-pressed', String(chip.dataset.id === String(selectedId)));
+    },
+    scrollToFlight(id) {
+      strip.querySelector(`button[data-id="${id}"]`)?.scrollIntoView({ block: 'nearest', inline: 'center' });
+    },
+
     showCard() {
       card.hidden = false;
     },
@@ -179,24 +206,35 @@ export function createUi(host, handlers) {
       card.hidden = true;
     },
     cardVisible: () => !card.hidden,
+    /**
+     * model: { name, source, who, note, grids: [cells, cells], follow: { show, pressed, enabled }, canFit }
+     * with cells = [{ key, label, value, sign }].
+     */
     updateCard(m) {
       name.textContent = m.name;
       source.textContent = m.source ?? '';
       source.hidden = !m.source;
       who.textContent = m.who ?? '';
       who.hidden = !m.who;
-      for (const [key] of [...STATS, ...FLIGHT_STATS]) {
-        if (key in m.values) values[key].textContent = m.values[key];
-      }
-      values.vs.dataset.sign = m.vsSign ?? '';
-      for (const key of ['agl', 'spd', 'vs', 'hdg']) card.querySelector(`[data-cell="${key}"]`).hidden = !m.flying && key !== 'agl';
-      card.querySelector('.grid.flight').hidden = !m.flying;
-      card.classList.toggle('grounded', !m.flying);
+      renderGrid(primary, m.grids[0] ?? []);
+      renderGrid(secondary, m.grids[1] ?? []);
       note.textContent = m.note ?? '';
       note.hidden = !m.note;
-      follow.setAttribute('aria-pressed', String(m.follow));
-      follow.disabled = !m.live;
+      follow.hidden = !m.follow.show;
+      follow.setAttribute('aria-pressed', String(m.follow.pressed));
+      follow.disabled = !m.follow.enabled;
       fit.disabled = !m.canFit;
+    },
+
+    /** A short label that follows the pointer (the flight under it), or null to remove it. */
+    hint(text, x = 0, y = 0) {
+      if (!text) {
+        hint.hidden = true;
+        return;
+      }
+      hint.textContent = text;
+      hint.hidden = false;
+      hint.style.transform = `translate(${Math.round(x + 14)}px, ${Math.round(y + 14)}px)`;
     },
     toast(text, ms = 3500) {
       toastBox.textContent = text;
@@ -206,9 +244,5 @@ export function createUi(host, handlers) {
         toastBox.hidden = true;
       }, ms);
     },
-    focusCard() {
-      closeButton.focus();
-    },
   };
-  return api;
 }

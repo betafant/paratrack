@@ -1,0 +1,6 @@
+# HTTPS in front of prack (docker compose --profile https). PRACK_DOMAIN must point at this machine.
+{$PRACK_DOMAIN} {
+	reverse_proxy prack:8000 {
+		flush_interval -1 # the live stream must not be buffered
+	}
+}

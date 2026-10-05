@@ -48,6 +48,14 @@ export class LiveStore {
     return id === undefined ? undefined : this.aircraft.get(id);
   }
 
+  /** The aircraft that is flying flight `flightId` (ids compare as text), if it is in the air. */
+  findByFlight(flightId) {
+    for (const entry of this.aircraft.values()) {
+      if (entry.flightId !== null && String(entry.flightId) === String(flightId)) return entry;
+    }
+    return undefined;
+  }
+
   list({ ground = true } = {}) {
     const all = [...this.aircraft.values()];
     return ground ? all : all.filter((a) => a.flying);

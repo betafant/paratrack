@@ -1,11 +1,14 @@
 # prack: paraglider tracker (OGN to SQL)
 
-Listens to the [Open Glider Network](https://www.glidernet.org) live feed, keeps **paragliders only**, cuts the
-stream into flights and stores every track point in an SQL database, with a minimal live map on top.
+Listens to the [Open Glider Network](https://www.glidernet.org) live feed, keeps **paragliders only** (OGN aircraft
+type 7), cuts the stream into flights and stores every track point in an SQL database, with a minimal map on top:
 
-> **Status: milestone 4 of 5 (live map).** `prack run` records flights from the live OGN feed and shows the
-> paragliders in the air on a map (labels, trails, selection with the whole track, 2D and 3D); `prack demo` does the
-> same offline with simulated pilots. The history calendar, Docker files and systemd unit come in milestone 5.
+- **Live:** the paragliders in the air, labelled, with trails; click one for its whole flight and a card; 2D or 3D.
+- **History:** a calendar shaded by flights per day; pick a day to see all its flights, click one for the details.
+- **Data:** one row per flight, about one fix per second (SQLite, or PostgreSQL), in real units through two views.
+
+It runs on a Windows PC or a small Linux server (Docker, systemd), needs no build step and no CDN, and `prack demo`
+works without internet.
 
 ## Quick start (Windows 10/11, PowerShell)
 
@@ -20,6 +23,8 @@ prack run                         # record flights and serve them: http://127.0.
 ```
 
 Open <http://127.0.0.1:8000>. `prack track` records without the web server (data in `data\prack.db`).
+A real run needs internet for the OGN feed, the terrain tiles and the swisstopo base maps; `prack demo` only needs
+the last two, and falls back to a plain background and invented altitudes without them.
 
 Linux and macOS: `python3 -m venv .venv && . .venv/bin/activate && pip install .`
 
@@ -83,13 +88,32 @@ One full-screen map and a few small controls. Everything is served by the app it
 | Faded line | The last six minutes of a paraglider, every position received. |
 | Click a marker or label | Selects it: the whole flight is drawn, coloured by altitude, and a card shows altitude, height above ground, speed, vario, heading, take-off time, duration and distance. **Follow** keeps the map on it (dragging the map stops following), the corner button fits the whole flight. Escape or × closes the card. Selecting survives a paraglider that switches from FANET to FLARM. |
 | **2D \| 3D** | 3D shows the terrain (exaggeration 1, pitch 60°, sky and fog), the track at its true altitude and a faint curtain down to the ground. Needs the terrain tiles (`PRACK_TERRAIN_ENABLED`, on by default). |
+| **Live \| History** | Switches the map between the paragliders in the air and the flights of one day (below). |
 | Layers button | Cycles through the base maps of the region file (swisstopo grey, colour, aerial). |
 | Sun / moon | Light or dark theme. Dark unless you chose otherwise or your system asks for light. |
 | Dot | Green: the OGN feed is up. Amber: connecting. Red: the browser has lost the server. |
 
 The address bar holds the view, so it can be bookmarked and the back button works:
-`#/live?sel=112880&view=3d&ll=46.80,8.23&z=11` (selected device address, 3D, camera). Times are shown in the region's
-time zone. On a phone the card is a bottom sheet; all controls are at least 44 px; keyboard focus is always visible.
+`#/live?sel=112880&view=3d&ll=46.80,8.23&z=11` (selected device address, 3D, camera) and
+`#/day/2026-07-15?sel=1234` (a day, a selected flight). Times are shown in the region's time zone. On a phone the card
+is a bottom sheet; all controls are at least 44 px; keyboard focus is always visible.
+
+### History
+
+Click **History** (or the date button, or the calendar) to look at the past. A day is the *local* calendar day on which
+a flight started.
+
+| Control | What it does |
+|---|---|
+| Date button | Opens the calendar: a month grid in which every day is shaded by its number of flights (square-root scaled against the busiest day of that month; hover or screen reader: "3 flights"). Click a day to show it. Keyboard: arrows move by day and week, Home/End to the ends of the week, Page Up/Down by month, Enter picks, Escape closes. Days after today cannot be picked. |
+| ◀ ▶ **Today** | The previous and next day, and back to today. |
+| The map | Every flight of the day as a thin line coloured by altitude (the simplified `preview` path, 500 points at most). Flights still in the air have no stored preview yet: their path is fetched from their track, a few at a time, and the day is loaded again every minute while you look at today. Hover a line for who and when; click it to select. |
+| Selecting | The flight's whole track at full resolution is drawn, bold, with a green take-off and a red landing dot; the other flights fade. The card shows max altitude, altitude gain, best climb, take-off time (local to where it took off), airborne time, distance and the landing time. The corner button fits the track. |
+| Strip at the bottom | One chip per flight (name and take-off time): click to select it and zoom to it. |
+| 2D \| 3D | As in Live: the day's flights at their true altitude over the terrain. |
+
+A flight only counts for the calendar and the day view once it has really flown (see [Web API](#web-api)); short hops
+and hikes with a device in the pocket stay in the database.
 
 Front-end files are in `prack/static/` (`js/` ES modules, `css/app.css`, all texts in `js/strings.js`). The libraries
 are vendored and pinned, see [`prack/static/vendor/README.md`](prack/static/vendor/README.md): MapLibre GL JS 5.24.0
@@ -216,21 +240,70 @@ flights = pd.read_sql("SELECT * FROM flights_v WHERE airborne", con)
 print(flights.groupby("local_date").distance_km.describe())
 ```
 
+## Deployment
+
+**Docker** (any Linux server, including Oracle Always Free ARM machines; the image is about 220 MB, runs as an
+unprivileged user and keeps its data in the volume `prack-data`):
+
+```sh
+cp .env.example .env              # set PRACK_AUTH_USER and PRACK_AUTH_PASSWORD before anyone else can reach it
+docker compose up -d --build      # http://127.0.0.1:8000, reachable from this machine only
+docker compose logs -f prack
+```
+
+`docker-compose.yml` publishes the port on `127.0.0.1` only (`PRACK_PUBLISH_PORT` in `.env` changes the number). To serve it on the internet with a certificate, point a
+DNS name at the machine, put `PRACK_DOMAIN=tracker.example.org` and the password in `.env` and run
+`docker compose --profile https up -d`: Caddy (see [`deploy/Caddyfile`](deploy/Caddyfile)) takes ports 80 and 443,
+gets a Let's Encrypt certificate and forwards to prack. Without a password do not do this.
+To upgrade, update the source and run `docker compose up -d --build` again; the data stays in the volume. The
+container's health check calls `/api/health`. `docker stop` (SIGTERM) makes the app write everything it has; flights
+still open are closed as gaps at the next start and resume if the pilot is still flying.
+
+**systemd** (no Docker): [`deploy/prack.service`](deploy/prack.service) runs `prack run` as the user `prack` with
+its data in `/var/lib/prack`, settings from `/etc/prack/prack.env` (a copy of `.env.example`), restart on failure and
+a strict sandbox. The commands to set it up are at the top of the file.
+
+**Behind another reverse proxy:** forward everything to port 8000 and turn buffering off for `/api/live/stream`
+(nginx: `proxy_buffering off;`, Caddy: `flush_interval -1`), otherwise the live view arrives in bursts.
+
+**Resources.** Measured with the simulator and 300 paragliders in the air at once: about 100 MB of RAM (55 MB when
+idle) and a few percent of one core. The database grows by roughly 60 bytes per fix, so 100 one-hour flights are about
+20 MB. Nothing is deleted automatically: remove old flights with SQL, or start a new database.
+
+**Backups.** SQLite: `sqlite3 data/prack.db ".backup backup.db"` works while prack runs (the database is in WAL
+mode). PostgreSQL: `pg_dump`. The terrain cache in `data/dem` can be thrown away.
+
+**PostgreSQL** instead of SQLite: `pip install ".[postgres]"` (already in the Docker image) and
+`PRACK_DATABASE_URL=postgresql+psycopg://user:password@host/prack`. Tables and views are created at the first start.
+
+## Troubleshooting
+
+| Symptom | Look at |
+|---|---|
+| `Activate.ps1 cannot be loaded` (PowerShell) | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, or use `cmd` and `.venv\Scripts\activate.bat`. |
+| The map is empty | `prack diagnose 60` and compare with <https://live.glidernet.org>; every dropped line has a reason. The dot in the top bar shows whether the OGN feed is up. |
+| Grey background, no base map | The swisstopo tiles are blocked or offline; the region file's `tiles` can point to another server. |
+| **3D** is greyed out | The terrain tiles are switched off (`PRACK_TERRAIN_ENABLED=false`). |
+| Aircraft without heights above ground | No terrain tiles reached the server (check `data/dem`); flights recorded meanwhile have no `ground` values. |
+| `Address already in use` | Another program uses port 8000: `prack run --port 8001`. |
+
 ## Development
 
 ```powershell
 pip install -e ".[dev]"
 playwright install chromium     # once, for the browser tests
-pytest          # parser, filters, tracker, de-duplication, schema, finalizer, client, API, demo, end-to-end, CLI, UI
+pytest          # parser, filters, tracker, de-duplication, schema, finalizer, client, API, demo, end-to-end, CLI, UI, deploy
 ruff check .
 ```
 
 Two groups of tests concern the front-end. `tests/js/*.test.mjs` test its pure logic (live store, track buffer, URL
 state, label placement, formatting) with `node --test`; they run from `pytest` when Node.js is installed.
-`tests/test_ui.py` drives headless Chromium (software WebGL, no GPU needed) through the real app with made-up flights:
-markers appear and are really drawn, labels follow the zoom, selecting shows the card and the track, 2D and 3D, themes,
-the phone layout, keyboard use, a broken stream, and no console errors. It saves screenshots to `tests/shots/` and is
-skipped when Playwright or Chromium is missing; `PRACK_TEST_CHROMIUM` points it at a browser binary.
+`tests/test_ui.py` and `tests/test_ui_history.py` drive headless Chromium (software WebGL, no GPU needed) through the
+real app with made-up flights: markers appear and are really drawn, labels follow the zoom, selecting shows the card and
+the track, 2D and 3D, the calendar and the day view, themes, the phone layout, keyboard use, a broken stream, and no
+console errors. They save screenshots to `tests/shots/` and are skipped when Playwright or Chromium is missing;
+`PRACK_TEST_CHROMIUM` points them at a browser binary. `tests/test_deploy.py` checks the Dockerfile, the compose file
+and the systemd unit (with `docker compose config` and `systemd-analyze verify` where they exist).
 
 To run the database tests on PostgreSQL as well, point `PRACK_TEST_PG_URL` at an empty scratch database (its tables
 are dropped!): `PRACK_TEST_PG_URL=postgresql+psycopg://user@localhost/prack_test pytest` (needs `pip install ".[postgres]"`).
@@ -247,11 +320,12 @@ prack/
   config.py regions.py db.py models.py views.py units.py geo.py stats.py terrain.py runtime.py
   api.py demo.py labels.py cli.py diagnose.py replay.py
   static/    index.html  css/app.css  vendor/ (MapLibre, deck.gl)
-             js/  main.js map.js layers.js ui.js store.js track.js trails.js declutter.js state.js api.js
-                  format.js colors.js strings.js theme-boot.js
+             js/  main.js map.js layers.js ui.js dom.js calendar.js store.js track.js trails.js previews.js
+                  dayview.js declutter.js state.js dates.js api.js format.js colors.js strings.js theme-boot.js
   regions/ch.toml
   ogn/       constants.py parser.py filters.py pipeline.py survey.py client.py ingest.py ddb.py
              builder.py fake_server.py simulator.py
   tracking/  tracker.py rules.py finalizer.py flightstats.py maintenance.py
-tests/        pytest files; js/ (node --test), test_ui.py with uirig.py (Playwright)
+tests/        pytest files; js/ (node --test), test_ui*.py with uirig.py (Playwright), test_deploy.py
+Dockerfile  docker-compose.yml  .dockerignore  deploy/ (prack.service, Caddyfile)
 ```

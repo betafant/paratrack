@@ -1,0 +1,51 @@
+# prack with Docker Compose.
+#
+#   docker compose up -d --build           the app on http://127.0.0.1:8000 (this machine only)
+#   docker compose --profile https up -d   also Caddy: automatic HTTPS for PRACK_DOMAIN (ports 80 and 443)
+#
+# Settings go into a file named .env next to this one (see .env.example). Set PRACK_AUTH_USER and
+# PRACK_AUTH_PASSWORD before the app is reachable from the internet. Data (SQLite file, terrain cache)
+# lives in the volume `prack-data`.
+
+services:
+  prack:
+    build: .
+    image: prack:latest
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      PRACK_HOST: 0.0.0.0 # inside the container; the published port below is what decides who can connect
+    ports:
+      - "127.0.0.1:${PRACK_PUBLISH_PORT:-8000}:8000"
+    volumes:
+      - prack-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s # the app finishes open flights and writes what it has on SIGTERM
+
+  # Only with --profile https: the public entrance, with a certificate from Let's Encrypt.
+  caddy:
+    profiles: ["https"]
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - prack
+    environment:
+      PRACK_DOMAIN: ${PRACK_DOMAIN:-localhost} # set it in .env to the name of this machine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+
+volumes:
+  prack-data:
+  caddy-data:

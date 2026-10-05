@@ -1,12 +1,15 @@
 // The URL hash is the state of the view, so a view can be bookmarked and the back button works:
 //   #/live                          all paragliders in the air
 //   #/live?sel=112880&view=3d       one selected (by device address), terrain view
+//   #/day/2026-07-15                the flights of a day (History)
+//   #/day/2026-07-15?sel=1234       one of them selected (by flight id)
 //   #/live?ll=46.80,8.23&z=7.4      camera position (written while moving, never makes history entries)
 
-const ROUTES = ['live'];
+import { isDay } from './dates.js';
+
 const ADDRESS = /^[A-Za-z0-9_-]{1,32}$/;
 
-export const DEFAULT_STATE = Object.freeze({ route: 'live', sel: null, view: '2d', ll: null, z: null });
+export const DEFAULT_STATE = Object.freeze({ route: 'live', day: null, sel: null, view: '2d', ll: null, z: null });
 
 function number(text, min, max) {
   const n = Number(text);
@@ -19,8 +22,11 @@ export function parseHash(hash = '') {
   const params = new URLSearchParams(query);
   const state = { ...DEFAULT_STATE };
 
-  const route = path.replace(/^\/+/, '').split('/')[0];
-  if (ROUTES.includes(route)) state.route = route;
+  const [route, day] = path.replace(/^\/+/, '').split('/');
+  if (route === 'day' && isDay(day)) {
+    state.route = 'day';
+    state.day = day;
+  }
 
   const sel = params.get('sel');
   if (sel && ADDRESS.test(sel)) state.sel = sel;
@@ -44,7 +50,8 @@ export function formatHash(state, { camera = true } = {}) {
   if (camera && state.ll) params.set('ll', `${state.ll[0].toFixed(5)},${state.ll[1].toFixed(5)}`);
   if (camera && state.z !== null && state.z !== undefined) params.set('z', state.z.toFixed(2));
   const query = params.toString().replace(/%2C/g, ',');
-  return `#/${state.route}${query ? `?${query}` : ''}`;
+  const path = state.route === 'day' && state.day ? `day/${state.day}` : 'live';
+  return `#/${path}${query ? `?${query}` : ''}`;
 }
 
 /** The part of the state that makes a new history entry when it changes (the camera does not). */

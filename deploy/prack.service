@@ -1,0 +1,48 @@
+# systemd unit for prack on a Linux server (Oracle Always Free, a Raspberry Pi, ...).
+#
+#   sudo useradd --system --home-dir /var/lib/prack --create-home --shell /usr/sbin/nologin prack
+#   sudo python3 -m venv /opt/prack/venv && sudo /opt/prack/venv/bin/pip install /path/to/prack
+#   sudo install -d -m 750 -o root -g prack /etc/prack
+#   sudo cp .env.example /etc/prack/prack.env     (edit it: PRACK_AUTH_*, PRACK_HOST, ...)
+#   sudo cp deploy/prack.service /etc/systemd/system/ && sudo systemctl daemon-reload
+#   sudo systemctl enable --now prack && journalctl -u prack -f
+
+[Unit]
+Description=prack: paraglider tracker (OGN to SQL)
+Documentation=https://github.com/betafant/paratrack
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=prack
+Group=prack
+WorkingDirectory=/var/lib/prack
+Environment=PRACK_DATA_DIR=/var/lib/prack
+EnvironmentFile=-/etc/prack/prack.env
+ExecStart=/opt/prack/venv/bin/prack run
+Restart=on-failure
+RestartSec=5
+# SIGTERM makes prack finish the open flights and write what it has; give it time.
+TimeoutStopSec=30
+
+# Hardening: the service needs the network and its own data directory, nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/prack
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

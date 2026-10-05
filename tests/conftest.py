@@ -23,3 +23,47 @@ def settings(tmp_path: Path) -> Settings:
     s.data_dir = tmp_path / "data"
     s.ddb_enabled = False
     return s
+
+
+# ---------------------------------------------------------------- browser tests (tests/test_ui*.py)
+
+
+@pytest.fixture(scope="session")
+def chromium():
+    from .uirig import browser
+
+    with browser() as b:
+        yield b
+
+
+@pytest.fixture(scope="session")
+def app(tmp_path_factory):
+    """The app served on a port, with a made-up feed; one for all browser tests."""
+    from .uirig import live_app
+
+    with live_app(tmp_path_factory.mktemp("ui")) as url:
+        yield url
+
+
+@pytest.fixture
+def make_page(chromium, app):
+    """make(path, theme=, size=, touch=) opens a page in a fresh browser context; problems fail the test at the end."""
+    from .uirig import Console, new_context
+
+    contexts, consoles = [], []
+
+    def make(url_path: str = "/", **options):
+        context = new_context(chromium, app, **options)
+        contexts.append(context)
+        console = Console(app)
+        consoles.append(console)
+        page = context.new_page()
+        console.attach(page)
+        page.goto(app + url_path)
+        return page
+
+    yield make
+    for context in contexts:
+        context.close()
+    problems = [p for c in consoles for p in c.problems]
+    assert not problems, "the page reported problems:\n" + "\n".join(problems)

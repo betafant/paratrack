@@ -8,6 +8,8 @@ export async function getJson(path, { signal } = {}) {
 }
 
 export const getConfig = () => getJson('api/config');
+export const getDays = (start, end, options) => getJson(`api/days?start=${start}&end=${end}`, options);
+export const getDayFlights = (day, options) => getJson(`api/days/${encodeURIComponent(day)}/flights`, options);
 export const getStatus = () => getJson('api/status');
 export const getTrack = (flightId, options) => getJson(`api/flights/${encodeURIComponent(flightId)}/track`, options);
 

@@ -1,0 +1,17 @@
+.git
+.github
+.venv
+.pytest_cache
+.ruff_cache
+**/__pycache__
+*.egg-info
+build
+dist
+data
+*.db
+*.db-wal
+*.db-shm
+.env
+tests
+deploy
+docker-compose.yml
