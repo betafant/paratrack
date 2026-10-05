@@ -1,0 +1,33 @@
+# Switzerland. To add another country, copy this file (e.g. at.toml), change the values and
+# list its id in PRACK_REGIONS, for example PRACK_REGIONS=ch,at
+
+id = "ch"
+name = "Switzerland"
+timezone = "Europe/Zurich"          # flight dates are local days in this zone
+# west, south, east, north (WGS84). New flights start only inside this box; the OGN feed is
+# requested with an extra margin (PRACK_OGN_FILTER_MARGIN_KM) so cross-border flights keep going.
+bbox = [5.85, 45.75, 10.55, 47.85]
+center = [8.23, 46.80]              # lon, lat
+zoom = 7.4
+default_basemap = "swisstopo-grey"
+
+[[basemaps]]
+id = "swisstopo-grey"
+name = "Grey"
+tiles = ["https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.pixelkarte-grau/default/current/3857/{z}/{x}/{y}.jpeg"]
+max_zoom = 18
+attribution = "© swisstopo"
+
+[[basemaps]]
+id = "swisstopo-colour"
+name = "Colour"
+tiles = ["https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.pixelkarte-farbe/default/current/3857/{z}/{x}/{y}.jpeg"]
+max_zoom = 18
+attribution = "© swisstopo"
+
+[[basemaps]]
+id = "swisstopo-aerial"
+name = "Aerial"
+tiles = ["https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.swissimage/default/current/3857/{z}/{x}/{y}.jpeg"]
+max_zoom = 19
+attribution = "© swisstopo"
