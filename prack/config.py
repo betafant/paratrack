@@ -80,6 +80,11 @@ class Settings:
     respect_stealth: bool = True
     min_fix_interval: float = 1.0  # seconds between stored fixes per aircraft
 
+    # Terrain elevation (Terrarium tiles): ground height below every fix, and the 3D terrain in the browser
+    terrain_enabled: bool = True
+    terrain_url: str = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
+    terrain_zoom: int = 12  # about 30 m per pixel in the Alps
+
     # OGN device database (registrations, competition numbers, opt-out flags)
     ddb_enabled: bool = True
     ddb_url: str = "https://ddb.glidernet.org/download/?j=1&t=1"
@@ -135,6 +140,9 @@ class Settings:
         s.tracked_types = get("TRACKED_TYPES", s.tracked_types, _types)
         s.respect_stealth = get("RESPECT_STEALTH", s.respect_stealth, _bool)
         s.min_fix_interval = get("MIN_FIX_INTERVAL", s.min_fix_interval, _fix_interval)
+        s.terrain_enabled = get("TERRAIN_ENABLED", s.terrain_enabled, _bool)
+        s.terrain_url = get("TERRAIN_URL", s.terrain_url, _tile_url)
+        s.terrain_zoom = get("TERRAIN_ZOOM", s.terrain_zoom, _terrain_zoom)
         s.ddb_enabled = get("DDB_ENABLED", s.ddb_enabled, _bool)
         s.ddb_url = get("DDB_URL", s.ddb_url, _url)
         s.auth_user = get("AUTH_USER", s.auth_user, str)
@@ -204,3 +212,16 @@ def _url(raw: str) -> str:
     if not raw.startswith(("http://", "https://")):
         raise ValueError("expected an http(s) URL")
     return raw
+
+
+def _tile_url(raw: str) -> str:
+    if not raw.startswith(("http://", "https://")) or not all(k in raw for k in ("{z}", "{x}", "{y}")):
+        raise ValueError("expected an http(s) URL containing {z}, {x} and {y}")
+    return raw
+
+
+def _terrain_zoom(raw: str) -> int:
+    zoom = int(raw)
+    if not 8 <= zoom <= 14:
+        raise ValueError("expected a zoom level between 8 and 14")
+    return zoom

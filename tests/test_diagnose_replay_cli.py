@@ -216,6 +216,7 @@ def cli_env(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PRACK_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("PRACK_DDB_ENABLED", "false")
+    monkeypatch.setenv("PRACK_TERRAIN_ENABLED", "false")  # tests never touch the network
     return tmp_path
 
 
@@ -319,3 +320,111 @@ def test_the_package_runs_as_a_module(cli_env):
     result = subprocess.run([sys.executable, "-m", "prack", "--version"], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0 and result.stdout.startswith("prack ")
     assert isinstance(Settings().data_dir, Path)
+
+
+# ---------------------------------------------------------------- the tracker-backed commands
+
+
+def sim_log(path, *, stamped: bool = False) -> int:
+    """A short simulated morning as a log file; returns the number of lines."""
+    from datetime import timedelta
+
+    from prack.ogn.simulator import PilotSpec, Simulator
+
+    short = {"flight_s": 120, "drop_m": 300.0, "stand_s": 300}
+    sim = Simulator(
+        datetime(2026, 7, 15, 9, 0, tzinfo=UTC),
+        [
+            PilotSpec("D00001", ("flarm", "fanet"), name="Mia", launch=(46.6453, 7.6511), **short),
+            PilotSpec("D00002", ("fanet",), name="Jonas", launch=(46.55, 8.2), delay_s=100, **short),
+            PilotSpec("A00001", aircraft_type=1, launch=(46.6453, 7.6511), **short),
+        ],
+        seed=3,
+    )
+    lines = []
+    for k in range(sim.duration_s() + 1):
+        now = sim.at(k)
+        stamp = f"{now + timedelta(milliseconds=250):%Y-%m-%dT%H:%M:%S.%f}"[:-3] + "Z " if stamped else ""
+        lines += [stamp + line for line in sim.lines(now)]
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return len(lines)
+
+
+@pytest.mark.parametrize("stamped", [False, True])
+def test_cli_replay_runs_the_tracker_into_the_database(cli_env, capsys, stamped):
+    log = cli_env / "morning.log"
+    n = sim_log(log, stamped=stamped)
+    code, out, _ = run_cli(capsys, "replay", str(log), "--date", "2026-07-15")
+    assert code == 0 and f"Replayed {n:,} lines" in out and "Stored in sqlite:///" in out
+    assert "=== Flights recorded by this replay: 2 (2 airborne)" in out
+    assert "FLRD00001" in out and "Mia" in out and "FNTD00002" in out and "landed" in out
+    assert "type not tracked (PRACK_TRACKED_TYPES=7 paraglider)" in out  # the glider is accounted for
+    from sqlalchemy import create_engine, text
+
+    engine = create_engine(f"sqlite:///{cli_env / 'data' / 'prack.db'}")
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT callsign, pilot_name, airborne, close_reason FROM flights_v ORDER BY callsign")
+        ).all()
+    assert rows == [("FLRD00001", "Mia", 1, "landed"), ("FNTD00002", "Jonas", 1, "landed")]
+    engine.dispose()
+
+
+def test_cli_replay_into_another_database_leaves_the_main_one_alone(cli_env, capsys):
+    log = cli_env / "morning.log"
+    sim_log(log)
+    code, out, _ = run_cli(
+        capsys, "replay", str(log), "--date", "2026-07-15", "--database", f"sqlite:///{cli_env / 'scratch.db'}"
+    )
+    assert code == 0 and (cli_env / "scratch.db").is_file() and not (cli_env / "data" / "prack.db").exists()
+
+
+def test_cli_replay_classify_only_stores_nothing(cli_env, capsys):
+    log = cli_env / "morning.log"
+    sim_log(log)
+    code, out, _ = run_cli(capsys, "replay", str(log), "--date", "2026-07-15", "--classify-only")
+    assert code == 0 and "Flights recorded" not in out and not (cli_env / "data").exists()
+
+
+def test_cli_repair_merges_and_purges(cli_env, capsys):
+    from prack.config import Settings
+    from prack.db import Database
+
+    from .factory import make_flight
+
+    db = Database(Settings.from_env({"PRACK_DATA_DIR": str(cli_env / "data")}, dotenv=None).db_url)
+    db.init()
+    make_flight(db, address="AAAAAA", source="FLARM", seconds=300)
+    make_flight(db, address="AAAAAA", source="FANET", seconds=300, step=4)
+    make_flight(db, address="BBBBBB", spikes=4)
+    db.dispose()
+    code, out, _ = run_cli(capsys, "repair", "--all")
+    assert code == 0 and "1 impossible flights deleted, 1 duplicate flights merged, 1 flights finished" in out
+
+
+def test_cli_track_records_a_feed_until_interrupted(cli_env, capsys, monkeypatch):
+    import time
+    from datetime import timedelta
+
+    from .test_runtime_e2e import all_lines, short_scenario, sim_span
+
+    lines = all_lines(short_scenario(datetime.now(UTC) - timedelta(seconds=sim_span())))
+    real_sleep = time.sleep
+    intervals = []
+
+    def sleep(seconds):
+        if seconds < 1:  # short waits inside the program keep working
+            return real_sleep(seconds)
+        intervals.append(seconds)  # the status loop: first let the feed arrive, then press Ctrl+C
+        real_sleep(2.0)
+        if len(intervals) > 1:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr("prack.cli.time.sleep", sleep)
+    with FakeOgnServer(lines, per_tick=200, interval=0.005) as server:
+        monkeypatch.setenv("PRACK_OGN_HOST", "127.0.0.1")
+        monkeypatch.setenv("PRACK_OGN_PORT", str(server.port))
+        code, out, _ = run_cli(capsys, "track", "--interval", "30")
+    assert code == 0 and intervals == [30.0, 30.0]
+    assert "Tracking a/48.120/5.456/45.480/10.944" in out and "link=connected" in out and "Stopping" in out
+    assert "flights opened=3" in out

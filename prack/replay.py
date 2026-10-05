@@ -12,11 +12,15 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .ogn.pipeline import LineClassifier, Result
 
 STAMP_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)Z\s+(.*)$")
 TIME_IN_LINE_RE = re.compile(r":[/@>](\d{2})(\d{2})(\d{2})h")
+if TYPE_CHECKING:
+    from .runtime import Runtime
+
 MAX_CLOCK_STEP = timedelta(hours=6)  # a larger jump of the time stamps does not move the clock
 
 
@@ -102,4 +106,26 @@ def replay_file(
         stats.lines += 1
         stats.first = stats.first or received_at
         stats.last = received_at
+    return stats
+
+
+def replay_into(runtime: Runtime, path: Path, day: date) -> ReplayStats:
+    """Run a log through the whole chain, tracker and database included, in simulated time.
+
+    Silent flights close when the log's own clock says so; flights still open at the end are closed as gaps, and the
+    finalizer runs before this returns.
+    """
+    seen = 0
+
+    def sink(result: Result, received_at: datetime) -> None:
+        nonlocal seen
+        runtime.route(result, received_at)
+        seen += 1
+        if seen % 2000 == 0:
+            runtime.tracker.flush()
+            runtime.tracker.sweep(received_at)
+
+    stats = replay_file(path, runtime.classifier, day=day, sink=sink)
+    runtime.tracker.close_all()
+    runtime.finalizer.drain()
     return stats

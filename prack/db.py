@@ -8,12 +8,14 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Engine, Insert, create_engine, event, text
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from .models import Base, Meta
+from .views import create_views
 
 
 def utcnow() -> datetime:
@@ -57,8 +59,15 @@ class Database:
         self._sessions = sessionmaker(self.engine, expire_on_commit=False)
 
     def init(self) -> None:
-        """Create tables that do not exist yet."""
+        """Create the tables that do not exist yet, and (re)create the analysis views."""
         Base.metadata.create_all(self.engine)
+        create_views(self.engine)
+
+    def insert_ignore(self, model: type[Base]) -> Insert:
+        """``INSERT ... ON CONFLICT DO NOTHING`` for the given model (SQLite and PostgreSQL)."""
+        if self.engine.dialect.name == "postgresql":
+            return postgresql.insert(model).on_conflict_do_nothing()
+        return sqlite.insert(model).on_conflict_do_nothing()
 
     @contextmanager
     def session(self) -> Iterator[Session]:
@@ -79,6 +88,19 @@ class Database:
     def set_meta(self, key: str, value: str) -> None:
         with self.session() as session:
             session.merge(Meta(key=key, value=value))
+
+    def size_bytes(self) -> int | None:
+        """Size of the database on disk (SQLite file plus write-ahead log), or PostgreSQL's own figure."""
+        try:
+            if self.engine.dialect.name == "postgresql":
+                with self.engine.connect() as conn:
+                    return int(conn.execute(text("SELECT pg_database_size(current_database())")).scalar_one())
+            name = make_url(self.url).database
+            if not name or name == ":memory:":
+                return None
+            return sum(p.stat().st_size for p in (Path(name), Path(name + "-wal")) if p.exists())
+        except Exception:  # noqa: BLE001 - a status figure, never worth failing for
+            return None
 
     def dispose(self) -> None:
         self.engine.dispose()

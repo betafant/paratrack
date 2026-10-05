@@ -95,6 +95,42 @@ ADSB_TOCALLS = frozenset({"OGADSB", "OGNADSB"})
 # Sources that carry no aircraft type at all (type 0 by design); only used for diagnostics.
 UNTYPED_SOURCES = frozenset({"LiveTrack24", "SPOT", "Spider", "SkyLines", "inReach", "Capturs", "AirMate"})
 
+# Protocol of a stored fix (``fixes.src``). 0-3 are the four that take part in de-duplication.
+SOURCE_CODES: dict[str, int] = {
+    "FLARM": 0,
+    "FANET": 1,
+    "OGN tracker": 2,
+    "OGN tracker (ADS-L)": 3,
+    "Flymaster": 4,
+    "Naviter": 5,
+    "SafeSky": 6,
+    "PureTrack": 7,
+    "SkyBase": 8,
+    "Wingman": 9,
+    "VarioVoice": 10,
+    "pgpilot": 11,
+    "Alpium": 12,
+    "flyXC": 13,
+    "WeGlide": 14,
+    "eVario": 15,
+    "AirMate": 16,
+    "Capturs": 17,
+}
+OTHER_SOURCE_CODE = 99
+
+# One device heard over several protocols is stored once, under the best of them. FLARM first: it sends
+# about one position per second with climb and turn rate. Lower number = preferred.
+SOURCE_PRIORITY: dict[str, int] = {"FLARM": 0, "FANET": 1, "OGN tracker": 2, "OGN tracker (ADS-L)": 3}
+
+
+def source_priority(source: str) -> int:
+    return SOURCE_PRIORITY.get(source, 9)
+
+
+def source_code(source: str) -> int:
+    return SOURCE_CODES.get(source, OTHER_SOURCE_CODE)
+
+
 NAVITER_TOCALL = "OGNAVI"
 WINGMAN_TOCALL = "OGNWMN"
 
