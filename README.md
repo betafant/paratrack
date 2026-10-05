@@ -3,9 +3,9 @@
 Listens to the [Open Glider Network](https://www.glidernet.org) live feed, keeps **paragliders only**, cuts the
 stream into flights and stores every track point in an SQL database, with a minimal live map on top.
 
-> **Status: milestone 3 of 5 (web API and demo mode).** `prack run` records flights from the live OGN feed and
-> serves them as a JSON API with a live stream; `prack demo` does the same offline with simulated pilots. The page at
-> `/` is a plain status page for now: the map comes in milestone 4, the history calendar in milestone 5.
+> **Status: milestone 4 of 5 (live map).** `prack run` records flights from the live OGN feed and shows the
+> paragliders in the air on a map (labels, trails, selection with the whole track, 2D and 3D); `prack demo` does the
+> same offline with simulated pilots. The history calendar, Docker files and systemd unit come in milestone 5.
 
 ## Quick start (Windows 10/11, PowerShell)
 
@@ -19,7 +19,7 @@ prack diagnose 60                 # listen for 60 s and explain what arrives (ne
 prack run                         # record flights and serve them: http://127.0.0.1:8000 (Ctrl+C stops)
 ```
 
-`prack track` records without the web server (data in `data\prack.db`).
+Open <http://127.0.0.1:8000>. `prack track` records without the web server (data in `data\prack.db`).
 
 Linux and macOS: `python3 -m venv .venv && . .venv/bin/activate && pip install .`
 
@@ -71,6 +71,29 @@ A region is one TOML file: id, name, time zone, bounding box, map centre and zoo
 folder and point `PRACK_REGIONS_DIR` at it, then list its id in `PRACK_REGIONS`. The box is where flights may
 *start*; the feed is requested with `PRACK_OGN_FILTER_MARGIN_KM` extra so flights that cross the border keep
 being tracked.
+
+## The map
+
+One full-screen map and a few small controls. Everything is served by the app itself (no CDN, no build step).
+
+| Control | What it does |
+|---|---|
+| Marker | A paraglider in the air, turned to its heading. Grey dots are paragliders on the ground (chip **Ground**, off by default). |
+| Label | `Mia · 1 587 m · −1.9`: name, altitude, vario. Names appear from zoom 9, the details from zoom 11 and for the selected one. Labels never overlap each other or other markers. The name is the FANET pilot name, else competition number and registration (only where the owner agreed to be identified in the OGN device database), else the callsign. |
+| Faded line | The last six minutes of a paraglider, every position received. |
+| Click a marker or label | Selects it: the whole flight is drawn, coloured by altitude, and a card shows altitude, height above ground, speed, vario, heading, take-off time, duration and distance. **Follow** keeps the map on it (dragging the map stops following), the corner button fits the whole flight. Escape or × closes the card. Selecting survives a paraglider that switches from FANET to FLARM. |
+| **2D \| 3D** | 3D shows the terrain (exaggeration 1, pitch 60°, sky and fog), the track at its true altitude and a faint curtain down to the ground. Needs the terrain tiles (`PRACK_TERRAIN_ENABLED`, on by default). |
+| Layers button | Cycles through the base maps of the region file (swisstopo grey, colour, aerial). |
+| Sun / moon | Light or dark theme. Dark unless you chose otherwise or your system asks for light. |
+| Dot | Green: the OGN feed is up. Amber: connecting. Red: the browser has lost the server. |
+
+The address bar holds the view, so it can be bookmarked and the back button works:
+`#/live?sel=112880&view=3d&ll=46.80,8.23&z=11` (selected device address, 3D, camera). Times are shown in the region's
+time zone. On a phone the card is a bottom sheet; all controls are at least 44 px; keyboard focus is always visible.
+
+Front-end files are in `prack/static/` (`js/` ES modules, `css/app.css`, all texts in `js/strings.js`). The libraries
+are vendored and pinned, see [`prack/static/vendor/README.md`](prack/static/vendor/README.md): MapLibre GL JS 5.24.0
+and deck.gl 9.4.0 (MapLibre 6 removed `map.transform`, which deck.gl 9.4 reads).
 
 ## Web API
 
@@ -197,9 +220,17 @@ print(flights.groupby("local_date").distance_km.describe())
 
 ```powershell
 pip install -e ".[dev]"
-pytest          # parser, filters, tracker, de-duplication, schema, finalizer, client, API, demo, end-to-end, CLI
+playwright install chromium     # once, for the browser tests
+pytest          # parser, filters, tracker, de-duplication, schema, finalizer, client, API, demo, end-to-end, CLI, UI
 ruff check .
 ```
+
+Two groups of tests concern the front-end. `tests/js/*.test.mjs` test its pure logic (live store, track buffer, URL
+state, label placement, formatting) with `node --test`; they run from `pytest` when Node.js is installed.
+`tests/test_ui.py` drives headless Chromium (software WebGL, no GPU needed) through the real app with made-up flights:
+markers appear and are really drawn, labels follow the zoom, selecting shows the card and the track, 2D and 3D, themes,
+the phone layout, keyboard use, a broken stream, and no console errors. It saves screenshots to `tests/shots/` and is
+skipped when Playwright or Chromium is missing; `PRACK_TEST_CHROMIUM` points it at a browser binary.
 
 To run the database tests on PostgreSQL as well, point `PRACK_TEST_PG_URL` at an empty scratch database (its tables
 are dropped!): `PRACK_TEST_PG_URL=postgresql+psycopg://user@localhost/prack_test pytest` (needs `pip install ".[postgres]"`).
@@ -215,10 +246,12 @@ database.
 prack/
   config.py regions.py db.py models.py views.py units.py geo.py stats.py terrain.py runtime.py
   api.py demo.py labels.py cli.py diagnose.py replay.py
-  static/    index.html
+  static/    index.html  css/app.css  vendor/ (MapLibre, deck.gl)
+             js/  main.js map.js layers.js ui.js store.js track.js trails.js declutter.js state.js api.js
+                  format.js colors.js strings.js theme-boot.js
   regions/ch.toml
   ogn/       constants.py parser.py filters.py pipeline.py survey.py client.py ingest.py ddb.py
              builder.py fake_server.py simulator.py
   tracking/  tracker.py rules.py finalizer.py flightstats.py maintenance.py
-tests/
+tests/        pytest files; js/ (node --test), test_ui.py with uirig.py (Playwright)
 ```

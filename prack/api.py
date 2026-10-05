@@ -72,6 +72,15 @@ def register_mime_types() -> None:
         mimetypes.add_type(mime, suffix)
 
 
+class RevalidatedStaticFiles(StaticFiles):
+    """Static files the browser checks again on every load (a cheap 304), so an upgrade shows up at once."""
+
+    def file_response(self, *args: Any, **kwargs: Any) -> Response:
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 class Guard:
     """Optional HTTP basic auth, plus a few headers that every response should carry. Pure ASGI, so it does not
     interfere with streaming responses."""
@@ -197,6 +206,18 @@ def _tile_bounds(z: int, x: int, y: int) -> tuple[float, float, float, float]:
     return x / n * 360.0 - 180.0, lat(y + 1), (x + 1) / n * 360.0 - 180.0, lat(y)
 
 
+def _terrain_bounds(regions: list[Region]) -> list[float]:
+    """[west, south, east, north] around all regions, slightly inside what ``_near_regions`` serves: the browser is
+    told not to ask for tiles beyond it (which would only be answered with 404)."""
+    inset = TILE_MARGIN_DEG - 0.02
+    return [
+        round(min(r.bbox[0] for r in regions) - inset, 4),
+        round(max(-85.0, min(r.bbox[1] for r in regions) - inset), 4),
+        round(max(r.bbox[2] for r in regions) + inset, 4),
+        round(min(85.0, max(r.bbox[3] for r in regions) + inset), 4),
+    ]
+
+
 def _near_regions(regions: list[Region], z: int, x: int, y: int) -> bool:
     west, south, east, north = _tile_bounds(z, x, y)
     for r in regions:
@@ -273,6 +294,8 @@ def create_app(
             "version": __version__,
             "regions": [r.public() for r in runtime.regions],
             "terrain": {
+                "enabled": settings.terrain_enabled,
+                "bounds": _terrain_bounds(runtime.regions),
                 "url": "/api/dem/{z}/{x}/{y}.png",
                 "encoding": "terrarium",
                 "tile_size": 256,
@@ -418,7 +441,7 @@ def create_app(
     # ------------------------------------------------------------------ static front-end, last
 
     if static_dir is not None and static_dir.is_dir():
-        app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
+        app.mount("/", RevalidatedStaticFiles(directory=static_dir, html=True), name="static")
 
     app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
     app.add_middleware(Guard, user=settings.auth_user, password=settings.auth_password)

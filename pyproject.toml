@@ -19,7 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.1"]
-dev = ["pytest>=8", "ruff>=0.5"]
+dev = ["pytest>=8", "ruff>=0.5", "playwright>=1.40"]  # browser tests also need `playwright install chromium`
 
 [project.scripts]
 prack = "prack.cli:main"
@@ -36,6 +36,7 @@ prack = ["regions/*.toml", "static/**/*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = ["ui: needs Playwright and Chromium (skipped when they are missing)"]
 
 [tool.ruff]
 line-length = 120

@@ -72,6 +72,8 @@ def test_config_has_what_the_map_needs(client):
     assert [m["id"] for m in region["basemaps"]] == ["swisstopo-grey", "swisstopo-colour", "swisstopo-aerial"]
     assert "wmts.geo.admin.ch" in region["basemaps"][0]["tiles"][0]
     assert j["terrain"] == {
+        "enabled": False,  # this test app has no terrain tiles
+        "bounds": [5.27, 45.17, 11.13, 48.43],  # the region box and the margin the tile proxy serves, less a hair
         "url": "/api/dem/{z}/{x}/{y}.png",
         "encoding": "terrarium",
         "tile_size": 256,

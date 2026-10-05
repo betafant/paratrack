@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import mimetypes
 
 import httpx
@@ -237,3 +238,27 @@ def test_days_work_with_the_real_clock(tmp_path):
     runtime = make_runtime(tmp_path, ddb=False)
     with serve(create_app(runtime)) as (url, _):
         assert httpx.get(url + "/api/days").json() == []
+
+
+def tile_of(lon: float, lat: float, z: int) -> tuple[int, int]:
+    n = 2**z
+    x = int((lon + 180.0) / 360.0 * n)
+    y = int((1.0 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2.0 * n)
+    return x, y
+
+
+@pytest.mark.parametrize("z", [4, 7, 10, 12])
+def test_the_browser_is_only_told_about_tiles_the_server_serves(tiles, z):
+    """``terrain.bounds`` in /api/config keeps MapLibre from asking for tiles that would only be answered with 404."""
+    client, _ = tiles
+    west, south, east, north = client.get("/api/config").json()["terrain"]["bounds"]
+    for lon, lat in (
+        (west + 0.01, south + 0.01),
+        (east - 0.01, north - 0.01),
+        ((west + east) / 2, (south + north) / 2),
+    ):
+        x, y = tile_of(lon, lat, z)
+        assert client.get(f"/api/dem/{z}/{x}/{y}.png").status_code == 200, (lon, lat)
+    if z >= 7:  # a coarser tile around Switzerland covers half of Europe: there is nothing outside to refuse
+        x, y = tile_of(east + 3.0, north + 3.0, z)
+        assert client.get(f"/api/dem/{z}/{x}/{y}.png").status_code == 404
