@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 import random
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -53,24 +54,45 @@ class _Pilot:
     samples: list[Sample] = field(default_factory=list)
 
 
-def build_flight(spec: PilotSpec, launch: tuple[float, float], seed: int) -> list[Sample]:
-    """One flight at 1 Hz, in a flat local frame (x east, y north, metres) converted to latitude and longitude."""
+Ground = Callable[[float, float], float | None]
+
+
+def build_flight(spec: PilotSpec, launch: tuple[float, float], seed: int, ground: Ground | None = None) -> list[Sample]:
+    """One flight at 1 Hz, in a flat local frame (x east, y north, metres) converted to latitude and longitude.
+
+    With ``ground`` (terrain height at a position) the flight is planned as height above the ground and then lifted
+    onto the real terrain, so it agrees with a 3D map; without it, altitudes are invented and the flight loses
+    ``drop_m`` metres between launch and landing.
+    """
     rng = random.Random(seed)
     lat0, lon0 = launch
     m_per_deg_lon = M_PER_DEG_LAT * math.cos(math.radians(lat0))
     x = y = 0.0
-    alt = 2000.0 + rng.uniform(-300, 300)
-    landing_alt = alt - (spec.drop_m if spec.drop_m is not None else rng.uniform(800, 1100))
+    on_terrain = ground is not None and ground(lat0, lon0) is not None
+    if on_terrain:
+        alt = landing_alt = 2.0  # metres above the ground; launch and landing are on the ground
+        g_smooth = ground(lat0, lon0)
+    else:
+        alt = 2000.0 + rng.uniform(-300, 300)
+        landing_alt = alt - (spec.drop_m if spec.drop_m is not None else rng.uniform(800, 1100))
+        g_smooth = 0.0
     heading = rng.uniform(0, 360)
     wind = (rng.uniform(-1.5, 1.5), rng.uniform(-1.5, 1.5))  # m/s drift while thermalling
     out: list[Sample] = []
 
     def emit(speed_kmh: float, climb: float, turn: float = 0.0, jitter: float = 0.0) -> None:
-        out.append(Sample(
-            lat0 + (y + rng.gauss(0, jitter)) / M_PER_DEG_LAT,
-            lon0 + (x + rng.gauss(0, jitter)) / m_per_deg_lon,
-            alt + rng.gauss(0, 0.3), speed_kmh, round(heading) % 360, climb, turn,
-        ))  # fmt: skip
+        nonlocal g_smooth
+        lat = lat0 + (y + rng.gauss(0, jitter)) / M_PER_DEG_LAT
+        lon = lon0 + (x + rng.gauss(0, jitter)) / m_per_deg_lon
+        msl = alt
+        if on_terrain:  # the planned height rides on terrain that may not change faster than 5 m/s
+            g = ground(lat, lon)
+            if g is not None:
+                g_smooth += max(-5.0, min(5.0, g - g_smooth))
+                msl = max(g_smooth + alt, g + min(alt, 20.0))  # and never closer than 20 m to the real ground
+            else:
+                msl = g_smooth + alt
+        out.append(Sample(lat, lon, msl + rng.gauss(0, 0.3), speed_kmh, round(heading) % 360, climb, turn))
 
     for _ in range(60):  # standing at the launch
         emit(0.0, 0.0, jitter=0.3)
@@ -115,14 +137,21 @@ def build_flight(spec: PilotSpec, launch: tuple[float, float], seed: int) -> lis
 
 
 class Simulator:
-    def __init__(self, start: datetime, pilots: list[PilotSpec], region: Region | None = None, seed: int = 7) -> None:
+    def __init__(
+        self,
+        start: datetime,
+        pilots: list[PilotSpec],
+        region: Region | None = None,
+        seed: int = 7,
+        ground: Ground | None = None,
+    ) -> None:
         self.start = start
         self.region = region
         rng = random.Random(seed)
         self.pilots: list[_Pilot] = []
         for i, spec in enumerate(pilots):
             launch = spec.launch or self._random_launch(rng)
-            samples = build_flight(spec, launch, seed * 1000 + i) if spec.sender == "pilot" else []
+            samples = build_flight(spec, launch, seed * 1000 + i, ground) if spec.sender == "pilot" else []
             self.pilots.append(_Pilot(spec, samples))
         self.launches = [p.samples[0] for p in self.pilots if p.samples]
 
@@ -132,27 +161,42 @@ class Simulator:
                 rng.uniform(west + 0.25 * (east - west), east - 0.25 * (east - west)))  # fmt: skip
 
     @classmethod
-    def demo(cls, start: datetime, region: Region | None = None, pilots: int = 12, seed: int = 7) -> Simulator:
-        """A day's mix: FLARM, FANET and dual-protocol pilots starting a few minutes apart, plus noise."""
+    def demo(
+        cls,
+        start: datetime,
+        region: Region | None = None,
+        pilots: int = 12,
+        seed: int = 7,
+        ground: Ground | None = None,
+        *,
+        protocols: Sequence[tuple[str, ...]] | None = None,
+        noise: bool = True,
+        stagger: int = 150,
+        address_base: int = 0xD00000,
+    ) -> Simulator:
+        """A day's mix: FLARM, FANET and dual-protocol pilots starting ``stagger`` seconds apart, plus noise."""
         names = ["Mia", "Jonas", "Lena", "Noah", "Elin", "Luca", "Sofia", "Matteo", "Anna", "Finn", "Nora", "Elias"]
-        combos = [("flarm",), ("fanet",), ("flarm", "fanet"), ("ogn",), ("flarm", "fanet", "adsl")]
-        specs = [
-            PilotSpec(
-                f"{0xD00000 + 17 * i:06X}",
-                combos[i % len(combos)],
-                names[i % len(names)] if "fanet" in combos[i % len(combos)] else None,
-                delay_s=150 * i,
-                flight_s=1800 + 240 * (i % 5),
-            )  # fmt: skip
-            for i in range(pilots)
-        ]
-        specs += [
-            PilotSpec("A00001", aircraft_type=1, delay_s=30),  # a glider
-            PilotSpec("A00002", aircraft_type=6, delay_s=60, flight_s=1200),  # a hang glider
-            PilotSpec("A00003", delay_s=90, stealth=True),  # a paraglider that does not want to be tracked
-            PilotSpec("3FF19F", delay_s=0, sender="adsb"),  # an ADS-B target that says "paraglider", at 300 km/h
-        ]
-        return cls(start, specs, region, seed)
+        combos = list(protocols or [("flarm",), ("fanet",), ("flarm", "fanet"), ("ogn",), ("flarm", "fanet", "adsl")])
+        specs = []
+        for i in range(pilots):
+            combo = combos[i % len(combos)]
+            specs.append(
+                PilotSpec(
+                    f"{address_base + 17 * i:06X}",
+                    combo,
+                    names[i % len(names)] if "fanet" in combo else None,
+                    delay_s=stagger * i,
+                    flight_s=1800 + 240 * (i % 5),
+                )  # fmt: skip
+            )
+        if noise:
+            specs += [
+                PilotSpec("A00001", aircraft_type=1, delay_s=30),  # a glider
+                PilotSpec("A00002", aircraft_type=6, delay_s=60, flight_s=1200),  # a hang glider
+                PilotSpec("A00003", delay_s=90, stealth=True),  # a paraglider that does not want to be tracked
+                PilotSpec("3FF19F", delay_s=0, sender="adsb"),  # an ADS-B target that says "paraglider", at 300 km/h
+            ]
+        return cls(start, specs, region, seed, ground)
 
     def lines(self, now: datetime) -> list[str]:
         """The APRS lines to send at this second of simulated time."""

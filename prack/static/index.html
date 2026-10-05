@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>prack</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 42rem; margin: 2.5rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.4rem; margin-bottom: .2rem; }
+  .muted { opacity: .65; }
+  code, pre { font: 13px ui-monospace, Consolas, monospace; }
+  pre { padding: .8rem 1rem; border-radius: 8px; background: rgba(127,127,127,.12); overflow-x: auto; }
+  .dot { display: inline-block; width: .6rem; height: .6rem; border-radius: 50%; background: #999; margin-right: .4rem; }
+  .ok { background: #2fb344; } .bad { background: #d63939; }
+</style>
+</head>
+<body>
+<h1>prack</h1>
+<p class="muted">Paraglider tracker. The map arrives with the next milestone; the API is already live.</p>
+<p><span id="dot" class="dot"></span><span id="line">connecting ...</span></p>
+<pre id="sources">&nbsp;</pre>
+<p>
+  <a href="/api/status">status</a> ·
+  <a href="/api/config">config</a> ·
+  <a href="/api/live">live</a> ·
+  <a href="/api/days">days</a> ·
+  <a href="/api/health">health</a>
+</p>
+<script>
+async function refresh() {
+  try {
+    const [status, live] = await Promise.all([fetch("/api/status").then(r => r.json()), fetch("/api/live").then(r => r.json())]);
+    const link = status.link.state;
+    document.getElementById("dot").className = "dot " + (["connected", "demo"].includes(link) ? "ok" : "bad");
+    document.getElementById("line").textContent =
+      `OGN link ${link} · ${live.aircraft.length} aircraft live · ${status.tracker.flying} flying · ` +
+      `${(status.counters["fixes.stored"] || 0).toLocaleString("en-GB")} fixes stored`;
+    document.getElementById("sources").textContent = status.sources.groups
+      .map(g => `${g.source.padEnd(14)} ${g.type_name.padEnd(12)} ${String(g.positions).padStart(8)}  ${JSON.stringify(g.outcomes)}`)
+      .join("\n") || "no positions received yet";
+  } catch (e) {
+    document.getElementById("dot").className = "dot bad";
+    document.getElementById("line").textContent = "no answer from the server";
+  }
+}
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

@@ -1,4 +1,4 @@
-"""Command line: ``prack config | init-db | ddb | diagnose | replay``."""
+"""Command line: ``prack run | demo | track | diagnose | replay | repair | config | ddb | init-db``."""
 
 from __future__ import annotations
 
@@ -27,6 +27,56 @@ from .replay import replay_file, replay_into
 from .runtime import Runtime
 from .stats import Counters
 from .tracking.maintenance import merge_duplicate_flights, purge_implausible
+
+
+def _serve(runtime: Runtime, settings: Settings, **app_options) -> None:
+    import uvicorn
+
+    from .api import create_app
+
+    app = create_app(runtime, manage_runtime=True, **app_options)
+    loopback = settings.host in ("127.0.0.1", "localhost", "::1")
+    if not loopback and not settings.auth_enabled:
+        logging.getLogger("prack").warning(
+            "Listening on %s without a password: anyone who can reach this port can read everything. "
+            "Set PRACK_AUTH_USER and PRACK_AUTH_PASSWORD.", settings.host,
+        )  # fmt: skip
+    print(f"prack {__version__} on http://{settings.host}:{settings.port}  (Ctrl+C stops)", flush=True)
+    uvicorn.run(
+        app, host=settings.host, port=settings.port, log_level=settings.log_level.lower(),
+        access_log=settings.log_level == "DEBUG", proxy_headers=True, forwarded_allow_ips="127.0.0.1",
+    )  # fmt: skip
+
+
+def _bind_overrides(args: argparse.Namespace, settings: Settings) -> None:
+    if args.host:
+        settings.host = args.host
+    if args.port:
+        settings.port = args.port
+
+
+def cmd_run(args: argparse.Namespace, settings: Settings) -> int:
+    """The web app and the OGN receiver."""
+    _bind_overrides(args, settings)
+    runtime = Runtime(settings)
+    _serve(runtime, settings)
+    return 0
+
+
+def cmd_demo(args: argparse.Namespace, settings: Settings) -> int:
+    """The same app, fed by simulated pilots instead of OGN; works offline and never touches the real database."""
+    from .demo import Demo, demo_database_path, remove_demo_database
+
+    _bind_overrides(args, settings)
+    remove_demo_database(settings.data_dir)
+    settings.database_url = f"sqlite:///{demo_database_path(settings.data_dir).resolve().as_posix()}"
+    settings.ddb_enabled = False
+    runtime = Runtime(settings, feed=False)
+    demo = Demo(runtime, speed=args.speed, pilots=args.pilots, history_days=args.history_days)
+    print(f"Demo mode: simulated pilots, separate database {demo_database_path(settings.data_dir)}")
+    demo.prepare()
+    _serve(runtime, settings, on_start=demo.start, on_stop=demo.stop)
+    return 0
 
 
 def cmd_config(args: argparse.Namespace, settings: Settings) -> int:
@@ -183,6 +233,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="prack", description="Paraglider tracker: OGN live feed to SQL.")
     parser.add_argument("--version", action="version", version=f"prack {__version__}")
     sub = parser.add_subparsers(dest="command", metavar="command")
+
+    p = sub.add_parser("run", help="start the web app and the OGN receiver")
+    p.add_argument("--host", help="address to listen on (default 127.0.0.1)")
+    p.add_argument("--port", type=int, help="port (default 8000)")
+    p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("demo", help="the web app with simulated pilots; works offline")
+    p.add_argument("--host")
+    p.add_argument("--port", type=int)
+    p.add_argument("--speed", type=float, default=1.0, help="simulated seconds per real second (1 to 60, default 1)")
+    p.add_argument("--pilots", type=int, default=12, help="pilots per wave (default 12)")
+    p.add_argument("--history-days", type=int, default=2, help="past days to record first (default 2)")
+    p.set_defaults(func=cmd_demo)
 
     p = sub.add_parser("config", help="show the effective configuration and the APRS-IS filter")
     p.set_defaults(func=cmd_config)

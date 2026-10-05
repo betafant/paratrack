@@ -27,6 +27,7 @@ from sqlalchemy import select, update
 from ..config import Settings
 from ..db import Database, utcnow
 from ..geo import distance_m
+from ..labels import label_for
 from ..models import Device, Fix, Flight
 from ..ogn.constants import source_code, source_priority
 from ..ogn.ddb import DdbInfo, DeviceDatabase
@@ -183,11 +184,7 @@ class DeviceState:
     live: bool = False
 
     def display_name(self) -> str:
-        if self.pilot_name:
-            return self.pilot_name
-        if self.competition_id and self.registration:
-            return f"{self.competition_id} {self.registration}"
-        return self.registration or self.competition_id or self.ident
+        return label_for(self.pilot_name, self.competition_id, self.registration, self.ident)
 
 
 class Tracker:
@@ -217,6 +214,7 @@ class Tracker:
         self.by_address: dict[str, str] = {}
         self.names: OrderedDict[str, str] = OrderedDict()  # FANET names heard before the device was tracked
         self.pending: list[tuple[int, Point]] = []
+        self._inflight: list[tuple[int, Point]] = []  # being written right now
         self.seq = 0
         self.removed: deque[tuple[int, str]] = deque(maxlen=5000)
         self._last_summary = 0.0
@@ -711,6 +709,7 @@ class Tracker:
         """
         with self.lock:
             taken, self.pending = self.pending, []
+            self._inflight = taken
             summaries: list[tuple[FlightAcc, dict]] = []
             now = utcnow().timestamp()
             if force or now - self._last_summary >= R.FLIGHT_UPDATE_S:
@@ -722,6 +721,8 @@ class Tracker:
                         acc.dirty = False
             rows = [fix_row(fid, p) for fid, p in taken]
         if not rows and not summaries:
+            with self.lock:
+                self._inflight = []
             return
         try:
             with self.db.session() as session:
@@ -737,8 +738,16 @@ class Tracker:
                 self.pending = queued[-MAX_PENDING:]
                 for acc, _ in summaries:
                     acc.dirty = True
+                self._inflight = []
             raise
+        with self.lock:
+            self._inflight = []
         self.counters.inc("fixes.stored", len(rows))
+
+    def unflushed(self, flight_id: int) -> list[Point]:
+        """Positions of a flight that are accepted but not yet in the database (up to about a second)."""
+        with self.lock:
+            return [p for fid, p in (*self._inflight, *self.pending) if fid == flight_id]
 
     def sweep(self, now: datetime | None = None) -> None:
         """Close flights that went silent, retire aircraft from the live view, forget old states."""

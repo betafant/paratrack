@@ -12,6 +12,8 @@ dependencies = [
   "sqlalchemy>=2.0",
   "httpx>=0.27",
   "pillow>=10.0",  # decodes the terrain tiles
+  "fastapi>=0.110",
+  "uvicorn>=0.29",
   "tzdata>=2024.1",  # time zone database; Windows has none built in
 ]
 
@@ -29,7 +31,7 @@ version = { attr = "prack.__version__" }
 include = ["prack*"]
 
 [tool.setuptools.package-data]
-prack = ["regions/*.toml"]
+prack = ["regions/*.toml", "static/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

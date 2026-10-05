@@ -3,9 +3,9 @@
 Listens to the [Open Glider Network](https://www.glidernet.org) live feed, keeps **paragliders only**, cuts the
 stream into flights and stores every track point in an SQL database, with a minimal live map on top.
 
-> **Status: milestone 2 of 5 (tracker and database).** `prack track` records flights from the live OGN feed into
-> SQL, with terrain height and statistics; `diagnose`, `replay` and `repair` work. The web API, the demo mode and the
-> map come in the next milestones.
+> **Status: milestone 3 of 5 (web API and demo mode).** `prack run` records flights from the live OGN feed and
+> serves them as a JSON API with a live stream; `prack demo` does the same offline with simulated pilots. The page at
+> `/` is a plain status page for now: the map comes in milestone 4, the history calendar in milestone 5.
 
 ## Quick start (Windows 10/11, PowerShell)
 
@@ -14,9 +14,12 @@ py -m venv .venv
 .\.venv\Scripts\Activate.ps1      # if scripts are blocked: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 pip install .
 prack config                      # what will run, and the APRS-IS filter that will be sent
+prack demo                        # simulated pilots, works offline: http://127.0.0.1:8000
 prack diagnose 60                 # listen for 60 s and explain what arrives (needs internet)
-prack track                       # record flights (Ctrl+C stops); data\prack.db
+prack run                         # record flights and serve them: http://127.0.0.1:8000 (Ctrl+C stops)
 ```
+
+`prack track` records without the web server (data in `data\prack.db`).
 
 Linux and macOS: `python3 -m venv .venv && . .venv/bin/activate && pip install .`
 
@@ -26,6 +29,8 @@ Linux and macOS: `python3 -m venv .venv && . .venv/bin/activate && pip install .
 |---|---|
 | `prack config` | Show the effective configuration, regions and APRS-IS filter. |
 | `prack diagnose [seconds]` | Connect to OGN (read only) and report which sources and aircraft types arrive and why each class is kept or dropped. `--record FILE` also saves every line. |
+| `prack run [--host H] [--port P]` | The whole app: connect to OGN, record flights, serve the web API on `http://127.0.0.1:8000` ([details](#web-api)). Ctrl+C stops it cleanly. |
+| `prack demo [--host H] [--port P] [--speed X] [--pilots N] [--history-days D]` | The same app fed by simulated pilots instead of OGN, so it works offline. It uses its own database `data/demo.db`, recreated at every start, and never touches `prack.db`. Needs no terrain download: if the tile server is reachable the simulated flights follow the real mountains, otherwise they use invented altitudes. `--speed` runs the clock faster (1 to 60, default 1). |
 | `prack track` | Record flights headless: connect to OGN and store them until Ctrl+C. Prints a status line every 30 s. Open flights are closed as gaps at the next start and resume if the pilot is still flying. |
 | `prack replay FILE [--date YYYY-MM-DD] [--database URL] [--classify-only]` | Run a recorded log through the parser, filters and tracker into the database (in simulated time) and list the flights it found. `--database` stores somewhere else (e.g. `sqlite:///scratch.db`); `--classify-only` stores nothing. Replaying a file twice records its flights twice. |
 | `prack repair [--all]` | Merge a pilot's flights that were recorded over two protocols, delete flights of impossible "paragliders", finish unfinished flights. Runs over the last week at every start; `--all` covers everything. |
@@ -55,7 +60,7 @@ Environment variables with the prefix `PRACK_`, or a `.env` file in the working 
 | `PRACK_DDB_ENABLED` / `PRACK_DDB_URL` | `true` / OGN download | Device database (opt-outs, registrations). |
 | `PRACK_DATA_DIR` | `data` | SQLite file and caches. |
 | `PRACK_DATABASE_URL` | | Empty: SQLite. PostgreSQL: `postgresql+psycopg://user:pw@host/prack` (`pip install ".[postgres]"`). |
-| `PRACK_HOST` / `PRACK_PORT` | `127.0.0.1` / `8000` | Web server (milestone 3). |
+| `PRACK_HOST` / `PRACK_PORT` | `127.0.0.1` / `8000` | Web server. Anything but loopback without a password logs a warning. |
 | `PRACK_AUTH_USER` / `PRACK_AUTH_PASSWORD` | | Optional HTTP basic auth, set both or neither. |
 | `PRACK_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`. |
 
@@ -66,6 +71,34 @@ A region is one TOML file: id, name, time zone, bounding box, map centre and zoo
 folder and point `PRACK_REGIONS_DIR` at it, then list its id in `PRACK_REGIONS`. The box is where flights may
 *start*; the feed is requested with `PRACK_OGN_FILTER_MARGIN_KM` extra so flights that cross the border keep
 being tracked.
+
+## Web API
+
+`prack run` and `prack demo` serve everything under one port. All responses are JSON unless noted; times are epoch
+seconds (UTC), dates are the local calendar day of the region, altitudes metres above sea level, speeds km/h.
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/health` | `{"ok": true}`; the only path that never asks for a password. |
+| `GET /api/status` | Link state, counters, drop reasons per class, tracker, queue and database sizes. |
+| `GET /api/config` | Version, regions (box, centre, zoom, base maps), terrain tile URL, stream settings. |
+| `GET /api/live` | Full snapshot: every aircraft heard in the last 10 minutes with its last six minutes of trail. |
+| `GET /api/live/stream` | Server-sent events, one message per second: only what changed (`aircraft` with new `pts`, `removed`), and every minute a full snapshot. A reconnecting client starts with a full one. |
+| `GET /api/days?start=&end=&region=` | `[{date, total}]` for the calendar (default: the last 90 days). |
+| `GET /api/days/{date}/flights` | Flights that started that day, with statistics and a simplified preview path. |
+| `GET /api/flights/{id}` | One flight, same shape. |
+| `GET /api/flights/{id}/track` | The whole track as columns (`t`, `lat`, `lon`, `alt`, `gnd`, `spd`, `vs`, `hdg`); also the points of a running flight not yet written to the database. |
+| `GET /api/dem/{z}/{x}/{y}.png` | Terrain tile for the 3D view, fetched once, cached in `data/dem`. Only tiles near a configured region are served. |
+
+A finished flight appears in the lists only if it counted as airborne (at least a minute more than 50 m above the
+ground), and a running one once its altitude has changed by more than 50 m, so car rides and hikes with a device in
+the pocket stay in the database but off the lists. The registration and competition number of a device are shown only when the OGN device database says
+the owner agreed to be identified.
+
+**Password.** Set `PRACK_AUTH_USER` and `PRACK_AUTH_PASSWORD` to ask for HTTP basic auth on everything but
+`/api/health`. Without TLS the password travels in clear text: put a reverse proxy with HTTPS in front when the
+port is reachable from the internet. Responses carry `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY` and
+`Referrer-Policy: same-origin`.
 
 ## What is filtered, and why
 
@@ -164,7 +197,7 @@ print(flights.groupby("local_date").distance_km.describe())
 
 ```powershell
 pip install -e ".[dev]"
-pytest          # parser, filters, tracker, de-duplication, schema, finalizer, client, end-to-end, CLI
+pytest          # parser, filters, tracker, de-duplication, schema, finalizer, client, API, demo, end-to-end, CLI
 ruff check .
 ```
 
@@ -181,7 +214,8 @@ database.
 ```
 prack/
   config.py regions.py db.py models.py views.py units.py geo.py stats.py terrain.py runtime.py
-  cli.py diagnose.py replay.py
+  api.py demo.py labels.py cli.py diagnose.py replay.py
+  static/    index.html
   regions/ch.toml
   ogn/       constants.py parser.py filters.py pipeline.py survey.py client.py ingest.py ddb.py
              builder.py fake_server.py simulator.py
